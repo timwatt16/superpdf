@@ -1338,8 +1338,14 @@ async function convertText() {
 let zoom = 0;
 let readerKey = '';
 const readerObserver = new IntersectionObserver((entries) => {
-  for (const en of entries) if (en.isIntersecting) paintReaderPage(en.target);
-}, { root: $('reader'), rootMargin: '600px 0px' });
+  for (const en of entries) {
+    if (en.isIntersecting) paintReaderPage(en.target);
+    else if (en.target.dataset.painted) { // free memory of pages far away (important on iPhone)
+      en.target.querySelectorAll('canvas').forEach((c) => { c.width = c.height = 0; c.remove(); });
+      delete en.target.dataset.painted;
+    }
+  }
+}, { root: $('reader'), rootMargin: '900px 900px' });
 
 async function pageSize(p) {
   const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
@@ -1387,7 +1393,13 @@ async function paintReaderPage(d) {
   if (d.dataset.painted) return;
   d.dataset.painted = '1';
   const p = D.pages[+d.dataset.i]; if (!p) return;
-  const c = await renderPageCanvas(p, +d.dataset.scale * (window.devicePixelRatio || 1), false);
+  // limit canvas size (iOS refuses canvases above ~16 megapixels)
+  const want = +d.dataset.scale * (window.devicePixelRatio || 1);
+  const w = parseFloat(d.style.width) / +d.dataset.scale, h = parseFloat(d.style.height) / +d.dataset.scale;
+  const maxPx = IS_TOUCH ? 12e6 : 36e6;
+  const sc = Math.min(want, Math.sqrt(maxPx / (w * h)));
+  const c = await renderPageCanvas(p, sc, false);
+  if (!d.dataset.painted || !d.isConnected) { c.width = c.height = 0; return; }
   d.insertBefore(c, d.firstChild);
 }
 async function renderPageCanvas(p, scale, withAnnots = true) {
@@ -1410,15 +1422,60 @@ $('reader').addEventListener('scroll', () => {
   if (document.activeElement !== $('pageInput')) $('pageInput').value = cur;
 }, { passive: true });
 
-function setZoom(z) {
+function setZoom(z, focus) {
   const r = $('reader');
-  const ratio = r.scrollTop / Math.max(1, r.scrollHeight);
+  const old = parseFloat($('zoomLabel').textContent) / 100 || 1;
+  // keep the point under the fingers / screen centre in place
+  const rr = r.getBoundingClientRect();
+  const fx = focus ? focus.x - rr.left : r.clientWidth / 2, fy = focus ? focus.y - rr.top : r.clientHeight / 2;
+  const px = (r.scrollLeft + fx) / old, py = (r.scrollTop + fy) / old;
   zoom = z;
-  renderReader(true).then(() => { r.scrollTop = ratio * r.scrollHeight; });
+  return renderReader(true).then(() => {
+    const k = (parseFloat($('zoomLabel').textContent) / 100 || z);
+    r.scrollLeft = px * k - fx; r.scrollTop = py * k - fy;
+  });
 }
+
+// pinch with two fingers to zoom the reader (iPhone / iPad / touch screens)
+(() => {
+  const R = $('reader'), W = $('readerPages');
+  let pinch = null;
+  const dist = (t) => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  const mid = (t) => ({ x: (t[0].clientX + t[1].clientX) / 2, y: (t[0].clientY + t[1].clientY) / 2 });
+  R.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 2 || annEditing) return;
+    const m = mid(e.touches), rr = R.getBoundingClientRect();
+    pinch = { d0: dist(e.touches), s0: parseFloat($('zoomLabel').textContent) / 100 || 1, m, k: 1 };
+    W.style.transformOrigin = `${R.scrollLeft + m.x - rr.left}px ${R.scrollTop + m.y - rr.top}px`;
+  }, { passive: true });
+  R.addEventListener('touchmove', (e) => {
+    if (!pinch || e.touches.length !== 2) return;
+    e.preventDefault();
+    const k = Math.max(0.25 / pinch.s0, Math.min(5 / pinch.s0, dist(e.touches) / pinch.d0));
+    pinch.k = k; pinch.m = mid(e.touches);
+    W.style.transform = `scale(${k})`;               // instant preview
+  }, { passive: false });
+  const end = () => {
+    if (!pinch) return;
+    const p = pinch; pinch = null;
+    const z = Math.max(0.25, Math.min(5, p.s0 * p.k));
+    if (Math.abs(p.k - 1) < 0.03) { W.style.transform = ''; return; }
+    setZoom(z, p.m).then(() => { W.style.transform = ''; });
+  };
+  R.addEventListener('touchend', (e) => { if (e.touches.length < 2) end(); });
+  R.addEventListener('touchcancel', end);
+  // double-tap: fit ⇄ 200 %
+  let lastTap = 0;
+  R.addEventListener('touchend', (e) => {
+    if (e.touches.length || e.changedTouches.length !== 1 || e.target.closest('.annot') || annTool) return;
+    const now = Date.now(), t = e.changedTouches[0];
+    if (now - lastTap < 300) { lastTap = 0; const cur = parseFloat($('zoomLabel').textContent) / 100 || 1; setZoom(zoom && cur > 1.2 ? 0 : Math.max(2, cur * 2), { x: t.clientX, y: t.clientY }); }
+    else lastTap = now;
+  });
+})();
 function zoomStep(dir) {
   const cur = parseFloat($('zoomLabel').textContent) / 100 || 1;
-  const steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4];
+  const steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5];
   const z = dir > 0 ? steps.find((s) => s > cur + 0.001) : [...steps].reverse().find((s) => s < cur - 0.001);
   setZoom(z || cur);
 }
@@ -2070,7 +2127,7 @@ window.addEventListener('keydown', (e) => {
   else if (c && (e.key === '=' || e.key === '+')) { e.preventDefault(); if (mode === 'read') zoomStep(1); }
   else if (c && e.key === '-') { e.preventDefault(); if (mode === 'read') zoomStep(-1); }
 });
-$('reader').addEventListener('wheel', (e) => { if (e.ctrlKey) { e.preventDefault(); zoomStep(e.deltaY < 0 ? 1 : -1); } }, { passive: false });
+$('reader').addEventListener('wheel', (e) => { if (e.ctrlKey) { e.preventDefault(); const cur = parseFloat($('zoomLabel').textContent) / 100 || 1; const steps = [0.25, 0.33, 0.5, 0.67, 0.75, 0.9, 1, 1.1, 1.25, 1.5, 1.75, 2, 2.5, 3, 4, 5]; const z = e.deltaY < 0 ? steps.find((x) => x > cur + 0.001) : [...steps].reverse().find((x) => x < cur - 0.001); if (z) setZoom(z, { x: e.clientX, y: e.clientY }); } }, { passive: false });
 window.addEventListener('resize', () => { if (mode === 'read' && zoom === 0) { clearTimeout(window.__rz); window.__rz = setTimeout(() => renderReader(), 200); } });
 window.addEventListener('beforeunload', (e) => { if (docs.some((d) => d.dirty && d.pages.length)) { e.preventDefault(); e.returnValue = ''; } });
 

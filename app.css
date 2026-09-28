@@ -262,3 +262,8 @@ section{position:absolute;inset:0;overflow:auto}
   .annbar>*{flex:none}
   .annsel{max-width:130px}
 }
+
+/* ---------- v1.5.2: zoom ---------- */
+.readerpages{width:max-content;min-width:100%;padding:0 8px;box-sizing:border-box}
+#reader{touch-action:pan-x pan-y}
+#readerPages{will-change:transform}
