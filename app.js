@@ -1628,19 +1628,41 @@ $('readerPages').addEventListener('pointerdown', (e) => {
   const [sx, sy] = annPoint(L, e), ox = a.x, oy = a.y;
   let moved = false;
   const box = annEl(sel);
-  const move = (ev) => {
+  try { box.setPointerCapture(e.pointerId); } catch {}
+  const R = $('reader');
+  const maxX = L.offsetWidth / s - 8, maxY = L.offsetHeight / s - 8;
+  let last = e, vy = 0, raf = 0;
+  const place = (ev) => {
     const [mx, my] = annPoint(L, ev);
     if (!moved && Math.hypot(mx - sx, my - sy) * s < 3) return;
     if (!moved) { moved = true; pushUndo(); }
-    a.x = ox + (mx - sx); a.y = oy + (my - sy);
+    a.x = Math.max(-4, Math.min(maxX, ox + (mx - sx)));
+    a.y = Math.max(-4, Math.min(maxY, oy + (my - sy)));
     box.style.left = a.x * s + 'px'; box.style.top = a.y * s + 'px';
   };
-  const up = () => {
-    window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up);
+  const tick = () => { // auto-scroll when the finger/mouse is near the top or bottom edge
+    raf = 0;
+    if (!vy) return;
+    R.scrollTop += vy; place(last);
+    raf = requestAnimationFrame(tick);
+  };
+  const move = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    ev.preventDefault();
+    last = ev; place(ev);
+    const rr = R.getBoundingClientRect(), edge = 56;
+    vy = !moved ? 0 : ev.clientY > rr.bottom - edge ? Math.min(18, (ev.clientY - (rr.bottom - edge)) / 3 + 2)
+      : ev.clientY < rr.top + edge ? -Math.min(18, ((rr.top + edge) - ev.clientY) / 3 + 2) : 0;
+    if (vy && !raf) raf = requestAnimationFrame(tick);
+  };
+  const up = (ev) => {
+    if (ev && ev.pointerId !== e.pointerId) return;
+    vy = 0; if (raf) cancelAnimationFrame(raf);
+    window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
     if (moved) { touchPage(p); refresh(); }
     else if (wasSel) startEdit();
   };
-  window.addEventListener('pointermove', move); window.addEventListener('pointerup', up);
+  window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
 });
 $('readerPages').addEventListener('dblclick', (e) => { if (e.target.closest('.annot') && !annEditing) startEdit(); });
 

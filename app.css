@@ -246,3 +246,19 @@ section{position:absolute;inset:0;overflow:auto}
 .annot.selected{border:1px solid var(--accent);box-shadow:0 0 0 3px rgba(20,102,224,.18)}
 .annot.editing{cursor:text;user-select:text;-webkit-user-select:text;background:rgba(255,255,255,.6);border:1px solid var(--accent);min-width:8px}
 .rpage canvas{position:absolute;inset:0}
+
+/* ---------- v1.5.1: touch fixes for text boxes ---------- */
+.annot{touch-action:none;-webkit-user-drag:none}
+.annot.editing{touch-action:auto}
+.annlayer.tool{touch-action:none}
+@media (hover:none) and (pointer:coarse){
+  .annot{min-width:24px;min-height:20px}
+  .annot.selected{box-shadow:0 0 0 4px rgba(20,102,224,.22)}
+}
+@media (max-width:760px){
+  .annbar{flex-wrap:nowrap;overflow-x:auto;gap:6px;padding:6px 10px;scrollbar-width:none}
+  .annbar::-webkit-scrollbar{display:none}
+  .annbar .tbtn span,.annhint{display:none}
+  .annbar>*{flex:none}
+  .annsel{max-width:130px}
+}
