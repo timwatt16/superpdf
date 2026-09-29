@@ -267,3 +267,66 @@ section{position:absolute;inset:0;overflow:auto}
 .readerpages{width:max-content;min-width:100%;padding:0 8px;box-sizing:border-box}
 #reader{touch-action:pan-x pan-y}
 #readerPages{will-change:transform}
+
+/* ---------- v1.6: scanner ---------- */
+.scanbtn{color:#fff;background:var(--accent);border-color:var(--accent)}
+.scanbtn:hover{background:#0f57c4}
+.scanner{position:fixed;inset:0;z-index:40;background:#111827;color:#fff;display:flex;flex-direction:column;padding-top:env(safe-area-inset-top)}
+.scanhead{display:flex;align-items:center;gap:10px;padding:8px 12px;background:#0b1220}
+.scanhead .tbtn{background:transparent;color:#fff;border-color:#374151}
+.scanhead .tbtn.primary{background:var(--accent);border-color:var(--accent)}
+.scantitle{flex:1;display:flex;flex-direction:column;line-height:1.2}
+.scantitle span{font-size:12px;color:#9ca3af}
+.scanstage{flex:1;position:relative;overflow:hidden;min-height:0}
+.scanempty{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:20px;color:#d1d5db}
+.scanempty small{color:#9ca3af}
+.scanbig{display:flex;gap:12px;margin-top:14px}
+.scanbig .tbtn{height:48px;padding:0 20px;font-size:16px}
+.scancrop{position:absolute;inset:8px}
+.scanpreview{position:absolute;inset:8px;display:flex;align-items:center;justify-content:center}
+.scanpreview canvas{max-width:100%;max-height:100%;background:#fff;box-shadow:0 4px 20px rgba(0,0,0,.5)}
+.scanbar{display:flex;align-items:center;gap:8px;padding:8px 12px;background:#0b1220;flex-wrap:wrap}
+.scanbar.col{flex-direction:column;align-items:stretch}
+.scanbar .tbtn{background:#1f2937;color:#fff;border-color:#374151}
+.scanbar .tbtn.primary{background:var(--accent);border-color:var(--accent)}
+.scanhint{flex:1;font-size:12.5px;color:#9ca3af;min-width:120px}
+.chips2{display:grid;grid-template-columns:repeat(4,1fr);gap:6px}
+.fchip{border:1px solid #374151;background:#1f2937;color:#e5e7eb;border-radius:10px;padding:6px 4px;cursor:pointer;font:inherit;line-height:1.25}
+.fchip small{color:#9ca3af;font-size:11px}
+.fchip.active{background:var(--accent);border-color:var(--accent);color:#fff}
+.fchip.active small{color:#dbeafe}
+.sliders{display:grid;grid-template-columns:1fr 1fr;gap:10px;font-size:12.5px;color:#d1d5db}
+.sliders label{display:flex;align-items:center;gap:8px}
+.sliders input{flex:1;accent-color:var(--accent)}
+.scanrow{display:flex;gap:8px;align-items:center}
+.scanrow #scanAccept{margin-left:auto}
+svg.flip{transform:scaleX(-1)}
+.scanstrip{display:flex;align-items:center;gap:8px;padding:8px 12px calc(8px + env(safe-area-inset-bottom));background:#030712;overflow-x:auto}
+.scanstrip .tbtn{background:#1f2937;color:#fff;border-color:#374151;flex:none}
+.scanthumbs{display:flex;gap:6px;flex:1;min-width:0;overflow-x:auto}
+.sthumb{position:relative;flex:none;height:64px;border-radius:4px;overflow:hidden;background:#fff}
+.sthumb img{height:64px;display:block}
+.sthumb b{position:absolute;left:2px;top:2px;background:rgba(0,0,0,.6);color:#fff;font-size:11px;border-radius:4px;padding:0 4px}
+.sthumb button{position:absolute;right:1px;top:1px;width:20px;height:20px;border-radius:50%;border:0;background:rgba(0,0,0,.6);color:#fff;font-size:12px;line-height:20px;padding:0;cursor:pointer}
+@media (max-width:760px){
+  .scanbar .tbtn span{display:inline}
+  .sliders{grid-template-columns:1fr}
+  .scanstrip .tbtn span{display:none}
+}
+/* ---------- v1.6: print (iPhone / Safari path) ---------- */
+.printarea{display:none}
+@media print{
+  @page{margin:0}
+  body.printing>*:not(#printArea){display:none!important}
+  body.printing{background:#fff;overflow:visible;height:auto;display:block}
+  body.printing #printArea{display:block}
+  #printArea img{display:block;width:100%;height:auto;break-after:page;page-break-after:always}
+  #printArea img:last-child{break-after:auto;page-break-after:auto}
+}
+.scanhead .tbtn span,.scanbig .tbtn span,.scanbar .tbtn span{display:inline!important}
+.modalbox input[type=radio],.modalbox input[type=checkbox]{width:auto;height:auto;flex:none}
+.modalbox .opt span{display:flex;flex-direction:column;gap:2px}
+@media (max-width:1500px){ #btnPrint span,#btnScan span,#btnBlank span{display:none} #btnPrint,#btnScan,#btnBlank{padding:0;width:34px;justify-content:center} }
+@media (max-width:760px){ #btnPrint,#btnScan,#btnBlank{width:auto;padding:0 9px} }
+.modalbox .field>label.opt{display:flex;font-weight:400;margin-bottom:6px}
+.scanbig .tbtn:not(.primary),.scanempty .tbtn:not(.primary){background:#1f2937;color:#fff;border-color:#374151}

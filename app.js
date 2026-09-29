@@ -1129,6 +1129,8 @@ function pageMenu(idx) {
     ] },
     { label: 'แยกหน้าที่เลือก (Split)', icon: 'split', sub: splitMenu() },
     { label: 'แปลงหน้าที่เลือก', icon: 'convert', sub: convertMenu() },
+    { label: 'ปรับภาพแบบถ่ายเอกสาร / ครอป', icon: 'scan', action: () => enhancePages(selPages()) },
+    { label: 'พิมพ์หน้าที่เลือก…', icon: 'print', kbd: 'Ctrl+P', action: () => printDialog('sel') },
     { label: 'คัดลอกไปยังแท็บ', icon: 'tab', sub: toTabMenu() },
     { sep: true },
     { label: 'เลือกทั้งหมด', icon: 'selall', kbd: 'Ctrl+A', action: selectAll },
@@ -1145,6 +1147,8 @@ function emptyAreaMenu() {
     { label: 'แยกไฟล์', icon: 'split', sub: splitMenu() },
     { label: 'แปลงไฟล์', icon: 'convert', sub: convertMenu() },
     { sep: true },
+    { label: 'สแกนเอกสารเพิ่ม…', icon: 'scan', action: () => openScanner() },
+    { label: 'พิมพ์…', icon: 'print', kbd: 'Ctrl+P', action: () => printDialog() },
     { label: 'บันทึก…', icon: 'save', kbd: 'Ctrl+S', action: () => saveAll() },
     { label: 'บันทึกเป็นไฟล์ใหม่…', icon: 'extract', kbd: 'Ctrl+Shift+S', action: () => saveAll(true) },
   ];
@@ -1843,6 +1847,443 @@ window.addEventListener('keydown', (e) => {
   if (handled) { e.preventDefault(); e.stopImmediatePropagation(); }
 }, true);
 
+// ------------------------------------------------------------------ scanner (สแกนเอกสาร) — scanic + photocopy filters
+const SCAN_W = 1654;                 // output width in px for a portrait A4 page (~200 dpi)
+const scan = {
+  queue: [],          // [{ canvas (source photo), replace? }]
+  cur: null,          // { src canvas, corners, out canvas (straightened), rot }
+  pages: [],          // accepted: [{ canvas, filter, dark, bright, thumb }]
+  filter: 'bw', dark: 50, bright: 50,
+  editor: null,
+  replace: null,      // when enhancing existing pages: [page uids]
+};
+try { const s = JSON.parse(localStorage.getItem('superpdf.scan') || '{}'); if (s.filter) scan.filter = s.filter; } catch {}
+
+function openScanner(opts = {}) {
+  scan.queue = []; scan.cur = null; scan.pages = []; scan.replace = opts.replace || null;
+  $('scanner').classList.remove('hidden');
+  $('scanDoneLbl').textContent = scan.replace ? 'แทนที่หน้าเดิม' : 'เสร็จ';
+  showScanStep('empty');
+  renderScanThumbs();
+  if (opts.images) { scan.queue.push(...opts.images); nextScanImage(); }
+}
+function closeScanner() {
+  if (scan.editor) { try { scan.editor.destroy(); } catch {} scan.editor = null; }
+  $('scanner').classList.add('hidden');
+  scan.queue = []; scan.cur = null; scan.pages = [];
+}
+function showScanStep(step) {
+  $('scanEmpty').classList.toggle('hidden', step !== 'empty');
+  $('scanCrop').classList.toggle('hidden', step !== 'crop');
+  $('scanCropBar').classList.toggle('hidden', step !== 'crop');
+  $('scanPreview').classList.toggle('hidden', step !== 'filter');
+  $('scanFilterBar').classList.toggle('hidden', step !== 'filter');
+  const n = scan.pages.length;
+  $('scanStep').textContent = step === 'crop' ? 'ขั้นที่ 1: ครอปและดึงให้ตรง' : step === 'filter' ? 'ขั้นที่ 2: ปรับภาพ' : (n ? `สแกนแล้ว ${n} หน้า` : '');
+  $('scanDone').disabled = !n;
+  $('scanDoneLbl').textContent = (scan.replace ? 'แทนที่หน้าเดิม' : 'เสร็จ') + (n ? ` (${n})` : '');
+}
+
+// photo file -> canvas (EXIF orientation applied by the browser), long side limited for memory
+async function photoToCanvas(file, maxSide = 3000) {
+  let bmp;
+  try { bmp = await createImageBitmap(file, { imageOrientation: 'from-image' }); }
+  catch { bmp = await loadImageEl(file); }
+  const w0 = bmp.width || bmp.naturalWidth, h0 = bmp.height || bmp.naturalHeight;
+  const k = Math.min(1, maxSide / Math.max(w0, h0));
+  const c = document.createElement('canvas'); c.width = Math.round(w0 * k); c.height = Math.round(h0 * k);
+  c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+  if (bmp.close) bmp.close();
+  return c;
+}
+async function addScanFiles(files) {
+  if (!files.length) return;
+  busy('กำลังเปิดรูป …');
+  try { for (const f of files) scan.queue.push({ canvas: await photoToCanvas(f) }); }
+  catch (e) { toast('เปิดรูปไม่ได้: ' + e.message, 'err'); }
+  unbusy();
+  if (!scan.cur) nextScanImage();
+}
+function nextScanImage() {
+  const item = scan.queue.shift();
+  if (!item) { scan.cur = null; showScanStep('empty'); return; }
+  startCrop(item);
+}
+const fullCorners = (c, inset = 0) => ({
+  topLeft: { x: inset, y: inset }, topRight: { x: c.width - inset, y: inset },
+  bottomRight: { x: c.width - inset, y: c.height - inset }, bottomLeft: { x: inset, y: c.height - inset },
+});
+async function detectCorners(c) {
+  try {
+    const r = await window.scanic.scanDocument(c, { mode: 'detect', maxProcessingDimension: 800 });
+    if (r && r.success && r.corners) return r.corners;
+  } catch {}
+  return null;
+}
+async function startCrop(item) {
+  scan.cur = { src: item.canvas, rot: 0, noCrop: !!item.noCrop, uid: item.uid };
+  if (item.noCrop) { scan.cur.corners = fullCorners(item.canvas); return finishCrop(); }
+  showScanStep('crop');
+  busy('กำลังหาขอบกระดาษ …');
+  const found = await detectCorners(item.canvas);
+  unbusy();
+  scan.cur.corners = found || fullCorners(item.canvas, Math.round(Math.min(item.canvas.width, item.canvas.height) * 0.05));
+  mountEditor(scan.cur.corners);
+  if (!found) toast('หาขอบกระดาษอัตโนมัติไม่พบ — กรุณาลากมุมเอง', '', [], 3500);
+}
+function mountEditor(corners) {
+  if (scan.editor) { try { scan.editor.destroy(); } catch {} scan.editor = null; }
+  const host = $('scanCrop'); host.innerHTML = '';
+  scan.editor = window.scanic.createCornerEditor({
+    container: host, image: scan.cur.src, corners,
+    toolbar: { enabled: false }, magnifier: { enabled: true, zoom: 2.5, size: 120 },
+    theme: { accent: '#3b82f6', mask: 'rgba(0,0,0,.45)', handleSize: 22 },
+    onChange: (c) => { scan.cur.corners = c; },
+  });
+}
+async function finishCrop() {
+  const c = scan.cur;
+  if (scan.editor) { c.corners = scan.editor.getCorners(); try { scan.editor.destroy(); } catch {} scan.editor = null; }
+  busy('กำลังดึงเอกสารให้ตรง …');
+  try {
+    let out = c.src;
+    const full = fullCorners(c.src);
+    const isFull = ['topLeft', 'topRight', 'bottomRight', 'bottomLeft'].every((k) => Math.hypot(c.corners[k].x - full[k].x, c.corners[k].y - full[k].y) < 2);
+    if (!isFull) {
+      const r = await window.scanic.extractDocument(c.src, c.corners, { output: 'canvas' });
+      if (!r || !r.success || !r.output) throw new Error(r && r.message || 'extract failed');
+      out = r.output;
+    }
+    c.flat = normalizeSize(out);
+  } catch (e) { unbusy(); toast('ดึงภาพไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  showScanStep('filter');
+  setFilterChip();
+  renderScanPreview();
+}
+// resize so the short side matches A4 width at ~200 dpi (keeps aspect ratio)
+function normalizeSize(src) {
+  const portrait = src.height >= src.width;
+  const k = SCAN_W / (portrait ? src.width : src.height);
+  const c = document.createElement('canvas');
+  c.width = Math.round(src.width * k); c.height = Math.round(src.height * k);
+  const g = c.getContext('2d'); g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, c.width, c.height);
+  return c;
+}
+function rotateCanvas(src, deg) {
+  if (!deg) return src;
+  const c = document.createElement('canvas');
+  const sw = deg % 180 !== 0;
+  c.width = sw ? src.height : src.width; c.height = sw ? src.width : src.height;
+  const g = c.getContext('2d');
+  g.translate(c.width / 2, c.height / 2); g.rotate(deg * Math.PI / 180); g.drawImage(src, -src.width / 2, -src.height / 2);
+  return c;
+}
+
+// ---- photocopy filters
+// background (paper brightness) map: block maximum -> dilate -> blur -> bilinear upsample; removes shadows & uneven light
+function backgroundMap(ch, W, H, B = 8) {
+  const w = Math.ceil(W / B), h = Math.ceil(H / B);
+  let m = new Float32Array(w * h);
+  for (let by = 0; by < h; by++) for (let bx = 0; bx < w; bx++) {
+    let mx = 0;
+    const y1 = Math.min(H, by * B + B), x1 = Math.min(W, bx * B + B);
+    for (let y = by * B; y < y1; y++) { const row = y * W; for (let x = bx * B; x < x1; x++) { const v = ch[row + x]; if (v > mx) mx = v; } }
+    m[by * w + bx] = mx;
+  }
+  const pass = (src, r, fn) => { // separable filter (max or mean)
+    const t = new Float32Array(w * h), o = new Float32Array(w * h);
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let a = fn === 'max' ? 0 : 0, n = 0;
+      for (let k = -r; k <= r; k++) { const xx = Math.min(w - 1, Math.max(0, x + k)); const v = src[y * w + xx]; if (fn === 'max') { if (v > a) a = v; } else { a += v; n++; } }
+      t[y * w + x] = fn === 'max' ? a : a / n;
+    }
+    for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+      let a = 0, n = 0;
+      for (let k = -r; k <= r; k++) { const yy = Math.min(h - 1, Math.max(0, y + k)); const v = t[yy * w + x]; if (fn === 'max') { if (v > a) a = v; } else { a += v; n++; } }
+      o[y * w + x] = fn === 'max' ? a : a / n;
+    }
+    return o;
+  };
+  m = pass(m, 3, 'max');
+  m = pass(m, 4, 'mean');
+  const out = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const fy = Math.min(h - 1.001, Math.max(0, (y + 0.5) / B - 0.5)), y0 = fy | 0, ty = fy - y0;
+    for (let x = 0; x < W; x++) {
+      const fx = Math.min(w - 1.001, Math.max(0, (x + 0.5) / B - 0.5)), x0 = fx | 0, tx = fx - x0;
+      const i = y0 * w + x0;
+      const a = m[i] + (m[i + 1] - m[i]) * tx, b = m[i + w] + (m[i + w + 1] - m[i + w]) * tx;
+      out[y * W + x] = Math.max(40, a + (b - a) * ty);
+    }
+  }
+  return out;
+}
+function applyScanFilter(src, filter, dark = 50, bright = 50) {
+  const W = src.width, H = src.height;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.drawImage(src, 0, 0);
+  const img = g.getImageData(0, 0, W, H), d = img.data, N = W * H;
+  const dk = (dark - 50) / 50, br = (bright - 50) / 50;   // -1 .. 1
+  if (filter === 'orig') {
+    const con = 1 + dk * 0.5, off = br * 50;
+    for (let i = 0; i < d.length; i += 4) for (let k = 0; k < 3; k++) d[i + k] = (d[i + k] - 128) * con + 128 + off;
+  } else if (filter === 'clean') {
+    const bgs = [0, 1, 2].map((k) => { const ch = new Uint8Array(N); for (let i = 0, j = k; i < N; i++, j += 4) ch[i] = d[j]; return backgroundMap(ch, W, H); });
+    const white = 236 - br * 20, black = 40 + dk * 40;
+    for (let i = 0, j = 0; i < N; i++, j += 4) {
+      let r = d[j] / bgs[0][i] * 255, gg = d[j + 1] / bgs[1][i] * 255, b = d[j + 2] / bgs[2][i] * 255;
+      const l = (r + gg + b) / 3;
+      r = l + (r - l) * 1.35; gg = l + (gg - l) * 1.35; b = l + (b - l) * 1.35;          // a bit more colour for ink / stamps
+      d[j] = (r - black) * 255 / (white - black); d[j + 1] = (gg - black) * 255 / (white - black); d[j + 2] = (b - black) * 255 / (white - black);
+    }
+  } else {
+    const lum = new Uint8Array(N);
+    for (let i = 0, j = 0; i < N; i++, j += 4) lum[i] = (d[j] * 299 + d[j + 1] * 587 + d[j + 2] * 114) / 1000;
+    const bg = backgroundMap(lum, W, H);
+    if (filter === 'gray') {
+      const white = 238 - br * 22, black = 60 + dk * 55;
+      for (let i = 0, j = 0; i < N; i++, j += 4) {
+        const n = lum[i] / bg[i] * 255;
+        const v = (n - black) * 255 / (white - black);
+        d[j] = d[j + 1] = d[j + 2] = v;
+      }
+    } else { // bw photocopy
+      const T = 200 + dk * 32 + br * -18;                       // darker -> more ink kept
+      for (let i = 0, j = 0; i < N; i++, j += 4) {
+        const v = lum[i] / bg[i] * 255 < T ? 0 : 255;
+        d[j] = d[j + 1] = d[j + 2] = v;
+      }
+    }
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+
+let scanPrevTimer = 0;
+function renderScanPreview() {
+  clearTimeout(scanPrevTimer);
+  scanPrevTimer = setTimeout(() => {
+    const c = scan.cur; if (!c || !c.flat) return;
+    const src = rotateCanvas(c.flat, c.rot);
+    const k = Math.min(1, 900 / Math.max(src.width, src.height));   // fast preview
+    const small = document.createElement('canvas'); small.width = Math.round(src.width * k); small.height = Math.round(src.height * k);
+    small.getContext('2d').drawImage(src, 0, 0, small.width, small.height);
+    const out = applyScanFilter(small, scan.filter, scan.dark, scan.bright);
+    const cv = $('scanCanvas'); cv.width = out.width; cv.height = out.height;
+    cv.getContext('2d').drawImage(out, 0, 0);
+  }, 60);
+}
+function setFilterChip() {
+  document.querySelectorAll('#scanFilters .fchip').forEach((b) => b.classList.toggle('active', b.dataset.f === scan.filter));
+  $('scanDark').value = scan.dark; $('scanBright').value = scan.bright;
+}
+function acceptScanPage() {
+  const c = scan.cur; if (!c || !c.flat) return;
+  busy('กำลังปรับภาพ …');
+  setTimeout(() => {
+    const out = applyScanFilter(rotateCanvas(c.flat, c.rot), scan.filter, scan.dark, scan.bright);
+    const t = document.createElement('canvas'); const k = 64 / out.height; t.width = Math.round(out.width * k); t.height = 64;
+    t.getContext('2d').drawImage(out, 0, 0, t.width, t.height);
+    scan.pages.push({ canvas: out, filter: scan.filter, thumb: t.toDataURL('image/jpeg', 0.7), uid: c.uid });
+    try { localStorage.setItem('superpdf.scan', JSON.stringify({ filter: scan.filter })); } catch {}
+    unbusy();
+    renderScanThumbs();
+    nextScanImage();
+  }, 20);
+}
+function renderScanThumbs() {
+  $('scanThumbs').replaceChildren(...scan.pages.map((p, i) => {
+    const d = document.createElement('div'); d.className = 'sthumb';
+    d.innerHTML = `<img src="${p.thumb}"><b>${i + 1}</b><button title="ลบ">✕</button>`;
+    d.querySelector('button').onclick = () => { scan.pages.splice(i, 1); renderScanThumbs(); if (!scan.cur) showScanStep('empty'); else showScanStep(scan.cur.flat ? 'filter' : 'crop'); };
+    return d;
+  }));
+  const hide = !!scan.replace;
+  $('scanMoreCam').classList.toggle('hidden', hide); $('scanMorePick').classList.toggle('hidden', hide);
+  if (!scan.cur) showScanStep('empty');
+}
+
+// accepted pages -> PDF (black & white pages stored as CCITT G4: tiny files)
+async function scanPagesToPdf(pages) {
+  const doc = await PDFDocument.create();
+  const { PDFName, PDFNumber } = window.PDFLib;
+  for (const p of pages) {
+    const cv = p.canvas, W = cv.width, H = cv.height;
+    const pw = 595.28 * (W <= H ? 1 : W / H), ph = pw * H / W;
+    const page = doc.addPage([pw, ph]);
+    if (p.filter === 'bw') {
+      const px = cv.getContext('2d').getImageData(0, 0, W, H).data;
+      const bits = new Uint8Array(W * H);
+      for (let i = 0, j = 0; i < bits.length; i++, j += 4) bits[i] = px[j] < 128 ? 1 : 0;
+      const g4 = TiffEnc.g4(bits, W, H);
+      const ctx = doc.context;
+      const dict = ctx.obj({
+        Type: 'XObject', Subtype: 'Image', Width: W, Height: H, ColorSpace: 'DeviceGray', BitsPerComponent: 1,
+        Filter: 'CCITTFaxDecode', DecodeParms: { K: -1, Columns: W, Rows: H, BlackIs1: false },
+      });
+      const raw = window.PDFLib.PDFRawStream.of(dict, g4);
+      const ref = ctx.register(raw);
+      const name = page.node.newXObject('Scan', ref);
+      page.pushOperators(
+        window.PDFLib.pushGraphicsState(),
+        window.PDFLib.concatTransformationMatrix(pw, 0, 0, ph, 0, 0),
+        window.PDFLib.drawObject(name),
+        window.PDFLib.popGraphicsState(),
+      );
+    } else {
+      const img = await doc.embedJpg(await canvasToBytes(cv, 'image/jpeg', p.filter === 'orig' ? 0.85 : 0.82));
+      page.drawImage(img, { x: 0, y: 0, width: pw, height: ph });
+    }
+  }
+  return doc.save();
+}
+async function finishScan() {
+  if (!scan.pages.length) return;
+  busy('กำลังสร้าง PDF …');
+  let bytes;
+  try { bytes = await scanPagesToPdf(scan.pages); }
+  catch (e) { unbusy(); toast('สร้าง PDF ไม่สำเร็จ: ' + e.message, 'err', [], 9000); return; }
+  unbusy();
+  const now = new Date(), stamp = `${now.getFullYear()}${pad(now.getMonth() + 1, 2)}${pad(now.getDate(), 2)}_${pad(now.getHours(), 2)}${pad(now.getMinutes(), 2)}`;
+  const nDone = scan.pages.length;
+  if (scan.replace) {
+    const src = await openPdfSource('สแกน_' + stamp + '.pdf', bytes);
+    pushUndo();
+    let lostText = false;
+    scan.pages.forEach((sp, k) => {
+      const i = D.pages.findIndex((p) => p.uid === sp.uid);
+      if (i < 0) return;
+      if (D.pages[i].annots && D.pages[i].annots.length) lostText = true;
+      D.pages[i] = { uid: uid(), src: src.id, index: k, rot: 0, av: 1, annots: [] };
+    });
+    if (lostText) toast('ข้อความที่เพิ่มไว้ในหน้าที่ปรับภาพถูกนำออก (กด เลิกทำ เพื่อย้อนกลับ)', '', [['เลิกทำ', undo]], 7000);
+    D.dirty = true;
+    closeScanner();
+    refresh();
+    toast(`ปรับภาพ ${nDone} หน้าแล้ว`, 'ok', [], 2500);
+    return;
+  }
+  const n = scan.pages.length;
+  closeScanner();
+  await insertOrOpen([{ name: 'สแกน_' + stamp + '.pdf', bytes }], insertionIndex());
+  toast(`เพิ่มหน้าสแกน ${n} หน้าแล้ว`, 'ok', [], 2500);
+}
+// enhance existing pages (render → filter screen, no crop by default)
+async function enhancePages(list) {
+  if (!list.length) return;
+  busy('กำลังเตรียมหน้า …');
+  const imgs = [];
+  for (const p of list) { const c = await renderPageCanvas(p, 200 / 72, false); imgs.push({ canvas: c, noCrop: true, uid: p.uid }); }
+  unbusy();
+  openScanner({ replace: list.map((p) => p.uid), images: imgs });
+}
+
+$('btnScan').onclick = () => openScanner();
+$('btnScanPick').onclick = (e) => { e.stopPropagation(); openScanner(); };
+$('scanClose').onclick = async () => {
+  if (scan.pages.length) {
+    const r = await dialog({ title: 'ปิดหน้าสแกน', body: `<p>มี ${scan.pages.length} หน้าที่สแกนไว้ยังไม่ได้ใส่ลงเอกสาร ต้องการทิ้งหรือไม่?</p>`, buttons: [['cancel', 'ยกเลิก'], ['drop', 'ทิ้ง'], ['keep', 'ใส่ลงเอกสาร', true]] });
+    if (!r.btn) return;
+    if (r.btn === 'keep') return finishScan();
+  }
+  closeScanner();
+};
+$('scanDone').onclick = finishScan;
+for (const id of ['scanCamBtn', 'scanMoreCam']) $(id).onclick = () => $('scanCam').click();
+for (const id of ['scanPickBtn', 'scanMorePick']) $(id).onclick = () => $('scanPick').click();
+for (const id of ['scanCam', 'scanPick']) $(id).onchange = async (e) => { const fs = [...e.target.files]; e.target.value = ''; await addScanFiles(fs); };
+$('scanAuto').onclick = async () => {
+  busy('กำลังหาขอบกระดาษ …'); const f = await detectCorners(scan.cur.src); unbusy();
+  if (f) { scan.cur.corners = f; mountEditor(f); } else toast('หาขอบอัตโนมัติไม่พบ', '', [], 2500);
+};
+$('scanFull').onclick = () => { scan.cur.corners = fullCorners(scan.cur.src); mountEditor(scan.cur.corners); };
+$('scanCropOk').onclick = finishCrop;
+$('scanRecrop').onclick = () => { const c = scan.cur; c.flat = null; showScanStep('crop'); mountEditor(c.corners); };
+$('scanRotL').onclick = () => { scan.cur.rot = (scan.cur.rot + 270) % 360; renderScanPreview(); };
+$('scanRotR').onclick = () => { scan.cur.rot = (scan.cur.rot + 90) % 360; renderScanPreview(); };
+$('scanAccept').onclick = acceptScanPage;
+document.querySelectorAll('#scanFilters .fchip').forEach((b) => { b.onclick = () => { scan.filter = b.dataset.f; setFilterChip(); renderScanPreview(); }; });
+$('scanDark').oninput = (e) => { scan.dark = +e.target.value; renderScanPreview(); };
+$('scanBright').oninput = (e) => { scan.bright = +e.target.value; renderScanPreview(); };
+
+// ------------------------------------------------------------------ print (พิมพ์)
+const IS_IOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+async function printDialog(preset) {
+  if (!D.pages.length) { toast('ยังไม่มีเอกสารให้พิมพ์'); return; }
+  const nSel = D.selected.size, total = D.pages.length;
+  const r = await dialog({
+    title: 'พิมพ์เอกสาร',
+    body: `<div class="field"><label>หน้าที่จะพิมพ์</label>
+      <label class="opt"><input type="radio" name="rng" value="all" ${preset !== 'sel' ? 'checked' : ''}><span>ทั้งเอกสาร<small>${total} หน้า</small></span></label>
+      <label class="opt"><input type="radio" name="rng" value="sel" ${preset === 'sel' ? 'checked' : ''} ${nSel ? '' : 'disabled'}><span>เฉพาะหน้าที่เลือก<small>${nSel ? nSel + ' หน้า' : 'ยังไม่ได้เลือกหน้า'}</small></span></label>
+      <label class="opt"><input type="radio" name="rng" value="range"><span>ช่วงหน้า<small><input name="from" type="text" inputmode="numeric" value="1" style="width:56px;height:30px"> ถึง <input name="to" type="text" inputmode="numeric" value="${total}" style="width:56px;height:30px"></small></span></label>
+      </div>${IS_IOS ? '<p>iPhone/iPad: เลือกเครื่องพิมพ์ (AirPrint) ได้ในหน้าต่างถัดไป</p>' : ''}`,
+    buttons: [['cancel', 'ยกเลิก'], ['ok', 'ถัดไป', true]],
+  });
+  if (!r.btn) return;
+  let list = D.pages;
+  if (r.values.rng === 'sel') list = selPages();
+  if (r.values.rng === 'range') {
+    const a = Math.max(1, Math.min(total, parseInt(r.values.from, 10) || 1)), b = Math.max(a, Math.min(total, parseInt(r.values.to, 10) || total));
+    list = D.pages.slice(a - 1, b);
+  }
+  if (!list.length) return;
+  if (IS_IOS) return printIOS(list);
+  return printPdfFrame(list);
+}
+// Windows / desktop: print the real PDF (vector, sharp text) through the browser's PDF viewer
+async function printPdfFrame(list) {
+  let bytes;
+  try { busy('กำลังเตรียมพิมพ์ …'); bytes = (await buildPdfInner(list, true)).bytes; }
+  catch (e) { unbusy(); toast('เตรียมพิมพ์ไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  document.querySelectorAll('iframe.printframe').forEach((f) => f.remove());
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'application/pdf' }));
+  const f = document.createElement('iframe');
+  f.className = 'printframe';
+  f.style.cssText = 'position:fixed;right:0;bottom:0;width:1px;height:1px;border:0;opacity:0;pointer-events:none';
+  f.onload = () => { setTimeout(() => { try { f.contentWindow.focus(); f.contentWindow.print(); } catch { printImages(list); } }, 300); };
+  f.src = url;
+  document.body.appendChild(f);
+  setTimeout(() => URL.revokeObjectURL(url), 10 * 60 * 1000);
+}
+// iPhone / iPad: render pages as images, then AirPrint via window.print(); or share the PDF → Print
+async function renderPrintImages(list) {
+  const area = $('printArea'); area.innerHTML = '';
+  for (let i = 0; i < list.length; i++) {
+    busy(`กำลังเตรียมพิมพ์ … หน้า ${i + 1}/${list.length}`);
+    const c = await renderPageCanvas(list[i], (IS_TOUCH ? 150 : 200) / 72);
+    const im = new Image(); im.src = URL.createObjectURL(await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9)));
+    c.width = c.height = 0;
+    area.appendChild(im);
+  }
+  await Promise.all([...area.images || area.querySelectorAll('img')].map((im) => im.decode().catch(() => {})));
+  unbusy();
+}
+function doWindowPrint() {
+  document.body.classList.add('printing');
+  const done = () => { document.body.classList.remove('printing'); window.removeEventListener('afterprint', done); };
+  window.addEventListener('afterprint', done);
+  window.print();
+  setTimeout(done, 60000);
+}
+async function printImages(list) { await renderPrintImages(list); doWindowPrint(); }
+async function printIOS(list) {
+  try { await renderPrintImages(list); } catch (e) { unbusy(); toast('เตรียมพิมพ์ไม่สำเร็จ: ' + e.message, 'err'); return; }
+  let pdfFile = null;
+  try { pdfFile = new File([(await buildPdfInner(list, true)).bytes], (D.name || 'เอกสาร') + '.pdf', { type: 'application/pdf' }); } catch {}
+  const canShare = pdfFile && navigator.canShare && navigator.canShare({ files: [pdfFile] });
+  const r = await dialog({
+    title: 'พร้อมพิมพ์แล้ว',
+    body: `<p>${list.length} หน้า — กด “พิมพ์” แล้วเลือกเครื่องพิมพ์ (AirPrint)</p>${canShare ? '<p><small>ถ้าปุ่มพิมพ์ไม่ทำงาน ให้กด “ผ่านเมนูแชร์” แล้วเลือก “พิมพ์ (Print)”</small></p>' : ''}`,
+    buttons: canShare ? [['cancel', 'ยกเลิก'], ['share', 'ผ่านเมนูแชร์'], ['print', 'พิมพ์', true]] : [['cancel', 'ยกเลิก'], ['print', 'พิมพ์', true]],
+  });
+  if (r.btn === 'print') doWindowPrint();
+  else if (r.btn === 'share') { try { await navigator.share({ files: [pdfFile] }); } catch {} }
+}
+$('btnPrint').onclick = () => printDialog();
+
 // ------------------------------------------------------------------ saving
 async function rasterPage(out, p) {
   const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
@@ -2115,6 +2556,7 @@ window.addEventListener('keydown', (e) => {
   else if (c && k === 'v') { pasteHandled = false; setTimeout(() => { if (!pasteHandled) pasteAny(); }, 120); }
   else if (c && k === 's') { e.preventDefault(); saveAll(e.shiftKey); }
   else if (c && k === 'o') { e.preventDefault(); doOpen(); }
+  else if (c && k === 'p') { e.preventDefault(); printDialog(); }
   else if (c && k === 't') { e.preventDefault(); switchTo(newDoc()); }
   else if (c && k === 'w') { e.preventDefault(); closeTab(D); }
   else if (c && e.key === 'Tab') { e.preventDefault(); const i = docs.indexOf(D); switchTo(docs[(i + (e.shiftKey ? -1 : 1) + docs.length) % docs.length]); }
@@ -2132,7 +2574,7 @@ window.addEventListener('resize', () => { if (mode === 'read' && zoom === 0) { c
 window.addEventListener('beforeunload', (e) => { if (docs.some((d) => d.dirty && d.pages.length)) { e.preventDefault(); e.returnValue = ''; } });
 
 // expose for automated testing
-window.__superpdf = { get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; } };
+window.__superpdf = { scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
