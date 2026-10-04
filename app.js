@@ -1129,6 +1129,9 @@ function pageMenu(idx) {
     ] },
     { label: 'แยกหน้าที่เลือก (Split)', icon: 'split', sub: splitMenu() },
     { label: 'แปลงหน้าที่เลือก', icon: 'convert', sub: convertMenu() },
+    { label: 'แก้ไขภาพ (ลบ/ย้ายวัตถุ, ยางลบ)…', icon: 'edit', action: () => openImageEditor(D.pages[idx]) },
+    ...(host.paint ? [{ label: 'แก้ไขภาพด้วย Paint…', icon: 'paint', action: () => openImageEditor(D.pages[idx], { paint: true }) }] : []),
+    { label: `ลบจุดสกปรก${n() > 1 ? ` (${n()} หน้า)` : ''}`, icon: 'clean', action: () => despecklePages(selPages()) },
     { label: 'ปรับภาพแบบถ่ายเอกสาร / ครอป', icon: 'scan', action: () => enhancePages(selPages()) },
     { label: 'พิมพ์หน้าที่เลือก…', icon: 'print', kbd: 'Ctrl+P', action: () => printDialog('sel') },
     { label: 'คัดลอกไปยังแท็บ', icon: 'tab', sub: toTabMenu() },
@@ -2110,7 +2113,7 @@ async function scanPagesToPdf(pages) {
   const { PDFName, PDFNumber } = window.PDFLib;
   for (const p of pages) {
     const cv = p.canvas, W = cv.width, H = cv.height;
-    const pw = 595.28 * (W <= H ? 1 : W / H), ph = pw * H / W;
+    const pw = p.wPt || 595.28 * (W <= H ? 1 : W / H), ph = p.hPt || pw * H / W;
     const page = doc.addPage([pw, ph]);
     if (p.filter === 'bw') {
       const px = cv.getContext('2d').getImageData(0, 0, W, H).data;
@@ -2573,8 +2576,653 @@ $('reader').addEventListener('wheel', (e) => { if (e.ctrlKey) { e.preventDefault
 window.addEventListener('resize', () => { if (mode === 'read' && zoom === 0) { clearTimeout(window.__rz); window.__rz = setTimeout(() => renderReader(), 200); } });
 window.addEventListener('beforeunload', (e) => { if (docs.some((d) => d.dirty && d.pages.length)) { e.preventDefault(); e.returnValue = ''; } });
 
+// ------------------------------------------------------------------ v1.7 image editor (แก้ไขภาพ) — select object / delete / move, eraser, pen, despeckle, edit in Paint
+const IE = {
+  open: false, uid: null, cv: null, g: null, view: 1, tool: 'select', sel: null, float: null,
+  undo: [], redo: [], size: 24, color: '#000000', strength: 40, group: 6, wPt: 0, hPt: 0,
+  changed: false, ink: null, paint: null, clip: null, op: null, pointers: new Map(), pinch: null,
+};
+const IE_MAX_UNDO = IS_TOUCH ? 6 : 20;
+const ieEl = (id) => document.getElementById(id);
+
+// --- pixel helpers
+const lumOf = (d, j) => (d[j] * 299 + d[j + 1] * 587 + d[j + 2] * 114) / 1000;
+const isInkPx = (d, j) => { const l = lumOf(d, j); if (l < 165) return true; const mx = Math.max(d[j], d[j + 1], d[j + 2]), mn = Math.min(d[j], d[j + 1], d[j + 2]); return mx - mn > 70 && l < 235; };
+
+// render a page in its own orientation (without the extra user rotation) so text boxes keep their coordinates
+async function renderPageBase(p, maxPx) {
+  const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
+  const b = pg.getViewport({ scale: 1, rotation: pg.rotate });
+  const sc = Math.min(200 / 72, Math.sqrt(maxPx / (b.width * b.height)));
+  const vp = pg.getViewport({ scale: sc, rotation: pg.rotate });
+  const c = document.createElement('canvas'); c.width = Math.round(vp.width); c.height = Math.round(vp.height);
+  const g = c.getContext('2d', { willReadFrequently: true }); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  await pg.render({ canvasContext: g, viewport: vp }).promise;
+  return { canvas: c, wPt: b.width, hPt: b.height };
+}
+
+// remove isolated small dark specks (scanner dust). Thai tone marks / dots next to letters are kept because they are not isolated.
+function despeckleCanvas(cv, strength = 40, rect = null) { // two passes: specks next to other specks become isolated after the first pass
+  let n = 0; for (let pass = 0; pass < 2; pass++) { const k = despecklePass(cv, strength, rect); n += k; if (!k) break; } return n;
+}
+function despecklePass(cv, strength, rect) {
+  const W = cv.width, H = cv.height, g = cv.getContext('2d', { willReadFrequently: true });
+  const x0 = rect ? Math.max(0, Math.floor(rect.x)) : 0, y0 = rect ? Math.max(0, Math.floor(rect.y)) : 0;
+  const w = rect ? Math.min(W - x0, Math.ceil(rect.w)) : W, h = rect ? Math.min(H - y0, Math.ceil(rect.h)) : H;
+  if (w < 3 || h < 3) return 0;
+  const img = g.getImageData(x0, y0, w, h), d = img.data, N = w * h;
+  const ink = new Uint8Array(N);
+  for (let i = 0, j = 0; i < N; i++, j += 4) ink[i] = (lumOf(d, j) < 170 || (Math.max(d[j], d[j + 1], d[j + 2]) - Math.min(d[j], d[j + 1], d[j + 2]) > 80 && lumOf(d, j) < 230)) ? 1 : 0;
+  // integral image of ink
+  const S = new Int32Array((w + 1) * (h + 1));
+  for (let y = 0; y < h; y++) { let row = 0; for (let x = 0; x < w; x++) { row += ink[y * w + x]; S[(y + 1) * (w + 1) + x + 1] = S[y * (w + 1) + x + 1] + row; } }
+  const boxSum = (ax, ay, bx, by) => { ax = Math.max(0, ax); ay = Math.max(0, ay); bx = Math.min(w - 1, bx); by = Math.min(h - 1, by); return S[(by + 1) * (w + 1) + bx + 1] - S[ay * (w + 1) + bx + 1] - S[(by + 1) * (w + 1) + ax] + S[ay * (w + 1) + ax]; };
+  const k = W / 1654, maxArea = Math.max(2, Math.round(k * k * (4 + strength * 1.2))), margin = Math.max(3, Math.round(W * 0.006));
+  const lab = new Int32Array(N), stack = new Int32Array(N);
+  let removed = 0, cur = 0;
+  const kill = [];
+  for (let s = 0; s < N; s++) {
+    if (!ink[s] || lab[s]) continue;
+    cur++; let sp = 0, area = 0, minx = w, miny = h, maxx = 0, maxy = 0, big = false;
+    stack[sp++] = s; lab[s] = cur;
+    while (sp) {
+      const q = stack[--sp]; area++;
+      const qx = q % w, qy = (q - qx) / w;
+      if (qx < minx) minx = qx; if (qx > maxx) maxx = qx; if (qy < miny) miny = qy; if (qy > maxy) maxy = qy;
+      for (let dy = -1; dy <= 1; dy++) {
+        const ny = qy + dy; if (ny < 0 || ny >= h) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const nx = qx + dx; if (nx < 0 || nx >= w) continue;
+          const nq = ny * w + nx; if (ink[nq] && !lab[nq]) { lab[nq] = cur; stack[sp++] = nq; }
+        }
+      }
+      if (area > maxArea) big = true;
+    }
+    if (big) continue;
+    if (boxSum(minx - margin, miny - margin, maxx + margin, maxy + margin) === area) kill.push(cur);
+  }
+  if (!kill.length) return 0;
+  const ks = new Uint8Array(cur + 1); for (const c of kill) ks[c] = 1;
+  for (let i = 0, j = 0; i < N; i++, j += 4) if (ks[lab[i]]) { d[j] = d[j + 1] = d[j + 2] = 255; d[j + 3] = 255; }
+  g.putImageData(img, x0, y0);
+  removed = kill.length;
+  return removed;
+}
+
+// low-resolution ink map + dilation, used to pick an "object" (a stamp, emblem, a line of text …) with one click
+function ieInkMap() {
+  if (IE.ink && IE.ink.group === IE.group) return IE.ink;
+  const cv = IE.cv, W = cv.width, H = cv.height;
+  const f = Math.max(1, Math.round(W / 1000));
+  const w = Math.ceil(W / f), h = Math.ceil(H / f);
+  const d = IE.g.getImageData(0, 0, W, H).data;
+  const ink = new Uint8Array(w * h);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const j = (y * W + x) * 4; if (isInkPx(d, j)) ink[((y / f) | 0) * w + ((x / f) | 0)] = 1; }
+  const r = Math.max(1, Math.round(IE.group * (W / 1654) / f));
+  // separable dilation with running counts
+  const tmp = new Uint8Array(w * h), dil = new Uint8Array(w * h);
+  for (let y = 0; y < h; y++) { let c = 0; const o = y * w; for (let x = -r; x < w + r; x++) { if (x + r < w && x + r >= 0) c += ink[o + x + r]; if (x - r - 1 >= 0 && x - r - 1 < w) c -= ink[o + x - r - 1]; if (x >= 0 && x < w) tmp[o + x] = c > 0 ? 1 : 0; } }
+  for (let x = 0; x < w; x++) { let c = 0; for (let y = -r; y < h + r; y++) { if (y + r < h && y + r >= 0) c += tmp[(y + r) * w + x]; if (y - r - 1 >= 0 && y - r - 1 < h) c -= tmp[(y - r - 1) * w + x]; if (y >= 0 && y < h) dil[y * w + x] = c > 0 ? 1 : 0; } }
+  IE.ink = { f, w, h, ink, dil, group: IE.group };
+  return IE.ink;
+}
+// component under (px,py) → selection { x,y,w,h, mask (low-res, f) }
+function iePickObject(px, py) {
+  const M = ieInkMap(), { f, w, h, dil } = M;
+  let sx = Math.floor(px / f), sy = Math.floor(py / f);
+  if (sx < 0 || sy < 0 || sx >= w || sy >= h) return null;
+  if (!dil[sy * w + sx]) { // tap near an object
+    let best = null; const R = Math.round(14 / f) + 2;
+    for (let rr = 1; rr <= R && !best; rr++) for (let dy = -rr; dy <= rr && !best; dy++) for (let dx = -rr; dx <= rr; dx++) {
+      const x = sx + dx, y = sy + dy; if (x < 0 || y < 0 || x >= w || y >= h) continue;
+      if (dil[y * w + x]) { best = [x, y]; break; }
+    }
+    if (!best) return null; [sx, sy] = best;
+  }
+  const comp = new Uint8Array(w * h), stack = new Int32Array(w * h);
+  let sp = 0, minx = w, miny = h, maxx = 0, maxy = 0;
+  stack[sp++] = sy * w + sx; comp[sy * w + sx] = 1;
+  while (sp) {
+    const q = stack[--sp], qx = q % w, qy = (q - qx) / w;
+    if (qx < minx) minx = qx; if (qx > maxx) maxx = qx; if (qy < miny) miny = qy; if (qy > maxy) maxy = qy;
+    if (qx > 0 && dil[q - 1] && !comp[q - 1]) { comp[q - 1] = 1; stack[sp++] = q - 1; }
+    if (qx < w - 1 && dil[q + 1] && !comp[q + 1]) { comp[q + 1] = 1; stack[sp++] = q + 1; }
+    if (qy > 0 && dil[q - w] && !comp[q - w]) { comp[q - w] = 1; stack[sp++] = q - w; }
+    if (qy < h - 1 && dil[q + w] && !comp[q + w]) { comp[q + w] = 1; stack[sp++] = q + w; }
+  }
+  // fill holes (e.g. the inside of a round emblem / stamp)
+  const bw = maxx - minx + 1, bh = maxy - miny + 1, out = new Uint8Array(bw * bh);
+  const st2 = new Int32Array(bw * bh); sp = 0;
+  const push = (x, y) => { const i = y * bw + x; if (out[i] || comp[(y + miny) * w + x + minx]) return; out[i] = 2; st2[sp++] = i; };
+  for (let x = 0; x < bw; x++) { push(x, 0); push(x, bh - 1); }
+  for (let y = 0; y < bh; y++) { push(0, y); push(bw - 1, y); }
+  while (sp) { const i = st2[--sp], x = i % bw, y = (i - x) / bw; if (x > 0) push(x - 1, y); if (x < bw - 1) push(x + 1, y); if (y > 0) push(x, y - 1); if (y < bh - 1) push(x, y + 1); }
+  for (let i = 0; i < out.length; i++) out[i] = out[i] === 2 ? 0 : 1;
+  return { x: minx * f, y: miny * f, w: Math.min(IE.cv.width - minx * f, bw * f), h: Math.min(IE.cv.height - miny * f, bh * f), mask: out, mw: bw, mh: bh, f };
+}
+const ieMaskAt = (s, x, y) => !s.mask || s.mask[Math.min(s.mh - 1, Math.floor(y / s.f)) * s.mw + Math.min(s.mw - 1, Math.floor(x / s.f))];
+function ieUnionSel(a, b) {
+  if (!a) return b; if (!b) return a;
+  const f = a.f || b.f || 1;
+  const x = Math.min(a.x, b.x), y = Math.min(a.y, b.y), x2 = Math.max(a.x + a.w, b.x + b.w), y2 = Math.max(a.y + a.h, b.y + b.h);
+  const mw = Math.ceil((x2 - x) / f), mh = Math.ceil((y2 - y) / f), mask = new Uint8Array(mw * mh);
+  for (const s of [a, b]) for (let my = 0; my < mh; my++) for (let mx = 0; mx < mw; mx++) {
+    const px = x + mx * f - s.x, py = y + my * f - s.y;
+    if (px >= 0 && py >= 0 && px < s.w && py < s.h && ieMaskAt(s, px, py)) mask[my * mw + mx] = 1;
+  }
+  return { x, y, w: x2 - x, h: y2 - y, mask, mw, mh, f };
+}
+
+// --- undo inside the editor
+function iePushUndo() {
+  IE.undo.push({ w: IE.cv.width, h: IE.cv.height, hPt: IE.hPt, data: IE.g.getImageData(0, 0, IE.cv.width, IE.cv.height) });
+  if (IE.undo.length > IE_MAX_UNDO) IE.undo.shift();
+  IE.redo = []; IE.changed = true; ieUpdateButtons();
+}
+function ieRestore(s) {
+  if (IE.cv.width !== s.w || IE.cv.height !== s.h) { IE.cv.width = s.w; IE.cv.height = s.h; IE.hPt = s.hPt; }
+  IE.g.putImageData(s.data, 0, 0); IE.ink = null; ieLayout();
+}
+const ieSnap = () => ({ w: IE.cv.width, h: IE.cv.height, hPt: IE.hPt, data: IE.g.getImageData(0, 0, IE.cv.width, IE.cv.height) });
+function ieUndo() { ieDropFloat(true); if (!IE.undo.length) return; IE.redo.push(ieSnap()); ieRestore(IE.undo.pop()); ieSetSel(null); ieUpdateButtons(); }
+function ieRedo() { ieCommit(); if (!IE.redo.length) return; IE.undo.push(ieSnap()); ieRestore(IE.redo.pop()); ieSetSel(null); ieUpdateButtons(); }
+function ieUpdateButtons() {
+  ieEl('ieUndo').disabled = !IE.undo.length && !IE.float; ieEl('ieRedo').disabled = !IE.redo.length;
+  const has = !!(IE.sel || IE.float);
+  ieEl('ieSelBar').classList.toggle('hidden', !has);
+  ieEl('iePasteBtn').disabled = !IE.clip;
+}
+const ieChanged = () => { IE.ink = null; IE.changed = true; };
+
+// --- open / close
+async function openImageEditor(p, opts = {}) {
+  if (!p) { toast('เลือกหน้าที่ต้องการแก้ไขก่อน'); return; }
+  busy('กำลังเตรียมภาพ …');
+  let r;
+  try { r = await renderPageBase(p, IS_TOUCH ? 9e6 : 20e6); } catch (e) { unbusy(); toast('เปิดหน้าไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  const old = ieEl('ieCanvas'), cv = r.canvas; cv.id = 'ieCanvas'; old.replaceWith(cv);
+  Object.assign(IE, { open: true, uid: p.uid, cv, g: cv.getContext('2d', { willReadFrequently: true }), wPt: r.wPt, hPt: r.hPt, sel: null, float: null, undo: [], redo: [], changed: false, ink: null, op: null });
+  IE.pointers.clear(); IE.pinch = null;
+  const i = D.pages.indexOf(p);
+  ieEl('ieStep').textContent = `หน้า ${i + 1} จาก ${D.pages.length}` + (p.rot ? ' · แสดงแบบยังไม่หมุน' : '');
+  ieEl('imged').classList.remove('hidden');
+  ieEl('iePaint').classList.toggle('hidden', !host.paint);
+  ieSetTool(IE.tool === 'select' || IE.tool === 'erase' || IE.tool === 'pen' ? IE.tool : 'select');
+  ieSetSel(null); ieFit(); ieUpdateButtons(); ieHint();
+  if (opts.paint) ieOpenPaint();
+}
+async function closeImageEditor(force = false) {
+  if (!force && (IE.changed || IE.float)) {
+    const r = await dialog({ title: 'ปิดหน้าแก้ไขภาพ', body: '<p>ภาพนี้ถูกแก้ไขแล้ว ต้องการนำไปใช้กับหน้าเอกสารหรือไม่?</p>', buttons: [['cancel', 'ยกเลิก'], ['drop', 'ทิ้งการแก้ไข'], ['apply', 'ใช้ภาพนี้', true]] });
+    if (!r.btn) return;
+    if (r.btn === 'apply') return ieApply();
+  }
+  ieStopPaint();
+  IE.open = false; IE.undo = []; IE.redo = []; IE.ink = null; IE.float = null; IE.sel = null;
+  ieEl('imged').classList.add('hidden');
+  const c = ieEl('ieCanvas'); c.width = c.height = 1;
+}
+async function ieApply() {
+  ieCommit();
+  const p = pageByUid(IE.uid);
+  if (!p) { toast('ไม่พบหน้าเดิมแล้ว', 'err'); return closeImageEditor(true); }
+  if (!IE.changed) return closeImageEditor(true);
+  busy('กำลังบันทึกภาพลงหน้า …');
+  try { await replacePagesWithCanvases([{ uid: IE.uid, canvas: IE.cv, wPt: IE.wPt, hPt: IE.hPt }], 'แก้ไขภาพ'); }
+  catch (e) { unbusy(); toast('บันทึกภาพไม่สำเร็จ: ' + e.message, 'err', [], 9000); return; }
+  unbusy();
+  closeImageEditor(true);
+  toast('แก้ไขภาพหน้าแล้ว', 'ok', [['เลิกทำ', undo]], 4000);
+}
+
+// pages → image pages (bilevel pages are stored as CCITT G4, others JPEG). Rotation and added text boxes are kept.
+function isBilevel(cv) {
+  const W = cv.width, H = cv.height, d = cv.getContext('2d', { willReadFrequently: true }).getImageData(0, 0, W, H).data;
+  let mid = 0, n = 0; const step = 4 * 3;
+  for (let j = 0; j < d.length; j += step) { n++; const l = lumOf(d, j); const s = Math.max(d[j], d[j + 1], d[j + 2]) - Math.min(d[j], d[j + 1], d[j + 2]); if ((l > 60 && l < 195) || s > 45) mid++; }
+  return mid / n < 0.004;
+}
+async function replacePagesWithCanvases(list, label) {
+  const bytes = await scanPagesToPdf(list.map((it) => ({ canvas: it.canvas, filter: isBilevel(it.canvas) ? 'bw' : 'orig', wPt: it.wPt, hPt: it.hPt })));
+  const now = new Date(), stamp = `${pad(now.getHours(), 2)}${pad(now.getMinutes(), 2)}${pad(now.getSeconds(), 2)}`;
+  const src = await openPdfSource(`${label}_${stamp}.pdf`, bytes);
+  pushUndo();
+  list.forEach((it, k) => {
+    const i = D.pages.findIndex((p) => p.uid === it.uid); if (i < 0) return;
+    const old = D.pages[i];
+    D.pages[i] = { uid: uid(), src: src.id, index: k, rot: old.rot, av: 1, annots: (old.annots || []).map(cloneAnn) };
+    if (D.selected.has(old.uid)) { D.selected.delete(old.uid); D.selected.add(D.pages[i].uid); }
+  });
+  D.dirty = true;
+  refresh();
+}
+async function despecklePages(list, strength = 40) {
+  if (!list.length) { toast('เลือกหน้าก่อน'); return; }
+  busy('กำลังลบจุดสกปรก …');
+  const out = []; let total = 0;
+  try {
+    for (const p of list) {
+      const r = await renderPageBase(p, IS_TOUCH ? 9e6 : 20e6);
+      const n = despeckleCanvas(r.canvas, strength);
+      if (n) { total += n; out.push({ uid: p.uid, canvas: r.canvas, wPt: r.wPt, hPt: r.hPt }); } else r.canvas.width = r.canvas.height = 0;
+    }
+    if (out.length) await replacePagesWithCanvases(out, 'ลบจุด');
+  } catch (e) { unbusy(); toast('ลบจุดไม่สำเร็จ: ' + e.message, 'err', [], 8000); return; }
+  unbusy();
+  out.forEach((o) => { o.canvas.width = o.canvas.height = 0; });
+  if (!total) toast('ไม่พบจุดสกปรกที่ต้องลบ', '', [], 3000);
+  else toast(`ลบจุดสกปรก ${total.toLocaleString()} จุด ใน ${out.length} หน้า`, 'ok', [['เลิกทำ', undo]], 6000);
+}
+
+// --- view / zoom
+function ieFit() {
+  const st = ieEl('ieStage'), pad2 = IS_TOUCH ? 16 : 40;
+  IE.view = Math.max(0.05, Math.min((st.clientWidth - pad2) / IE.cv.width, (st.clientHeight - pad2) / IE.cv.height, 2));
+  ieLayout();
+}
+function ieZoom(f, cx, cy) {
+  const st = ieEl('ieStage'), r = st.getBoundingClientRect();
+  if (cx == null) { cx = r.left + st.clientWidth / 2; cy = r.top + st.clientHeight / 2; }
+  const ip = ieToImg(cx, cy);
+  IE.view = Math.max(0.05, Math.min(8, IE.view * f));
+  ieLayout();
+  const cr = IE.cv.getBoundingClientRect();
+  st.scrollLeft += cr.left + ip.x * IE.view - cx; st.scrollTop += cr.top + ip.y * IE.view - cy;
+}
+function ieLayout() {
+  const W = IE.cv.width * IE.view, H = IE.cv.height * IE.view;
+  Object.assign(IE.cv.style, { width: W + 'px', height: H + 'px' });
+  Object.assign(ieEl('ieWrap').style, { width: W + 'px', height: H + 'px' });
+  ieEl('ieZoomLbl').textContent = Math.round(IE.view * IE.cv.width / IE.wPt * 100) + '%';
+  ieDrawSel();
+}
+function ieToImg(cx, cy) { const r = IE.cv.getBoundingClientRect(); return { x: (cx - r.left) / IE.view, y: (cy - r.top) / IE.view }; }
+
+// --- selection & floating layer
+function ieSetSel(s) { IE.sel = s; ieDrawSel(); ieUpdateButtons(); ieHint(); }
+function ieDrawSel() {
+  const box = ieEl('ieSel'), s = IE.float || IE.sel;
+  if (!s) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  Object.assign(box.style, { left: s.x * IE.view + 'px', top: s.y * IE.view + 'px', width: s.w * IE.view + 'px', height: s.h * IE.view + 'px' });
+  box.classList.toggle('floating', !!IE.float);
+  const c = box.querySelector('canvas');
+  if (IE.float) {
+    if (c.dataset.src !== IE.float.id) { c.width = IE.float.cv.width; c.height = IE.float.cv.height; c.getContext('2d').drawImage(IE.float.cv, 0, 0); c.dataset.src = IE.float.id; }
+  } else if (s.mask) {
+    const key = 'm' + s.x + ',' + s.y + ',' + s.mw + ',' + s.mh;
+    if (c.dataset.src !== key) {
+      c.width = s.mw; c.height = s.mh; const g = c.getContext('2d'), im = g.createImageData(s.mw, s.mh);
+      for (let i = 0; i < s.mask.length; i++) if (s.mask[i]) { im.data[i * 4] = 20; im.data[i * 4 + 1] = 102; im.data[i * 4 + 2] = 224; im.data[i * 4 + 3] = 70; }
+      g.putImageData(im, 0, 0); c.dataset.src = key;
+    }
+  } else { c.width = 1; c.height = 1; c.dataset.src = ''; }
+}
+let ieFloatSeq = 0;
+function ieLift(copyOnly = false) { // selection → floating pixels (white made transparent); the original spot becomes white
+  const s = IE.sel; if (!s || IE.float) return;
+  const x = Math.max(0, Math.floor(s.x)), y = Math.max(0, Math.floor(s.y)), w = Math.min(IE.cv.width - x, Math.ceil(s.w)), h = Math.min(IE.cv.height - y, Math.ceil(s.h));
+  if (w < 1 || h < 1) return;
+  iePushUndo();
+  const src = IE.g.getImageData(x, y, w, h), fd = new ImageData(w, h), sd = src.data, d = fd.data;
+  for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) {
+    const j = (yy * w + xx) * 4;
+    if (!ieMaskAt(s, xx, yy)) continue;
+    const l = lumOf(sd, j), sat = Math.max(sd[j], sd[j + 1], sd[j + 2]) - Math.min(sd[j], sd[j + 1], sd[j + 2]);
+    d[j] = sd[j]; d[j + 1] = sd[j + 1]; d[j + 2] = sd[j + 2];
+    d[j + 3] = (l > 238 && sat < 25) ? 0 : (l > 215 && sat < 25 ? Math.round((238 - l) / 23 * 255) : 255);
+    if (!copyOnly) { sd[j] = sd[j + 1] = sd[j + 2] = 255; }
+  }
+  if (!copyOnly) IE.g.putImageData(src, x, y);
+  const fc = document.createElement('canvas'); fc.width = w; fc.height = h; fc.getContext('2d').putImageData(fd, 0, 0);
+  IE.float = { cv: fc, x, y, w, h, id: 'f' + (++ieFloatSeq) };
+  IE.sel = null; ieChanged(); ieDrawSel(); ieUpdateButtons();
+}
+function ieCommit() { // stamp the floating pixels back onto the image
+  if (!IE.float) { if (IE.sel) ieSetSel(null); return; }
+  const f = IE.float; IE.g.drawImage(f.cv, f.x, f.y, f.w, f.h);
+  IE.float = null; ieChanged(); ieSetSel(null);
+}
+function ieDropFloat(stampBack) { if (!IE.float) return; if (stampBack) ieCommit(); else { IE.float = null; ieChanged(); ieSetSel(null); } }
+function ieDelete() {
+  if (IE.float) { IE.float = null; ieChanged(); ieSetSel(null); return; }
+  const s = IE.sel; if (!s) return;
+  iePushUndo();
+  const x = Math.max(0, Math.floor(s.x)), y = Math.max(0, Math.floor(s.y)), w = Math.min(IE.cv.width - x, Math.ceil(s.w)), h = Math.min(IE.cv.height - y, Math.ceil(s.h));
+  if (!s.mask) { IE.g.fillStyle = '#fff'; IE.g.fillRect(x, y, w, h); }
+  else {
+    const im = IE.g.getImageData(x, y, w, h), d = im.data;
+    for (let yy = 0; yy < h; yy++) for (let xx = 0; xx < w; xx++) if (ieMaskAt(s, xx, yy)) { const j = (yy * w + xx) * 4; d[j] = d[j + 1] = d[j + 2] = 255; d[j + 3] = 255; }
+    IE.g.putImageData(im, x, y);
+  }
+  ieChanged(); ieSetSel(null);
+  toast('ลบแล้ว', '', [['เลิกทำ', ieUndo]], 2500);
+}
+function ieDuplicate() {
+  if (!IE.float && !IE.sel) return;
+  if (!IE.float) { ieLift(true); } else { iePushUndo(); IE.g.drawImage(IE.float.cv, IE.float.x, IE.float.y, IE.float.w, IE.float.h); }
+  const off = Math.round(24 / Math.max(IE.view, 0.2));
+  IE.float.x += off; IE.float.y += off; ieChanged(); ieDrawSel();
+}
+function ieCopy(cut = false) {
+  if (!IE.float && !IE.sel) return;
+  let f = IE.float, lifted = false; const prevSel = IE.sel;
+  if (!f) { ieLift(!cut); f = IE.float; lifted = true; if (!f) return; }
+  const c = document.createElement('canvas'); c.width = f.cv.width; c.height = f.cv.height; c.getContext('2d').drawImage(f.cv, 0, 0);
+  IE.clip = { cv: c, w: f.w, h: f.h };
+  if (cut) { IE.float = null; ieChanged(); ieSetSel(null); }
+  else if (lifted) { IE.float = null; IE.undo.pop(); ieSetSel(prevSel); } // copy alone does not change the picture
+  toast(cut ? 'ตัดแล้ว' : 'คัดลอกแล้ว — กด Ctrl+V เพื่อวาง', '', [], 1800);
+  ieUpdateButtons();
+}
+function iePasteCanvas(c, w, h) {
+  ieCommit(); iePushUndo();
+  const maxW = IE.cv.width * 0.8, maxH = IE.cv.height * 0.8, k = Math.min(1, maxW / w, maxH / h);
+  w *= k; h *= k;
+  const st = ieEl('ieStage'), r = st.getBoundingClientRect(), mid = ieToImg(r.left + st.clientWidth / 2, r.top + st.clientHeight / 2);
+  const x = Math.max(0, Math.min(IE.cv.width - w, mid.x - w / 2)), y = Math.max(0, Math.min(IE.cv.height - h, mid.y - h / 2));
+  IE.float = { cv: c, x, y, w, h, id: 'f' + (++ieFloatSeq) };
+  ieChanged(); ieDrawSel(); ieUpdateButtons(); ieHint();
+}
+function iePaste() { if (IE.clip) { const c = document.createElement('canvas'); c.width = IE.clip.cv.width; c.height = IE.clip.cv.height; c.getContext('2d').drawImage(IE.clip.cv, 0, 0); iePasteCanvas(c, IE.clip.w, IE.clip.h); } }
+async function iePasteImageBlob(blob) {
+  try {
+    const bm = await createImageBitmap(blob);
+    const c = document.createElement('canvas'); c.width = bm.width; c.height = bm.height; c.getContext('2d').drawImage(bm, 0, 0);
+    // paper white → transparent so a pasted signature / stamp sits on the page naturally
+    const g = c.getContext('2d'), im = g.getImageData(0, 0, c.width, c.height), d = im.data;
+    for (let j = 0; j < d.length; j += 4) { const l = lumOf(d, j), s = Math.max(d[j], d[j + 1], d[j + 2]) - Math.min(d[j], d[j + 1], d[j + 2]); if (l > 238 && s < 25) d[j + 3] = 0; }
+    g.putImageData(im, 0, 0);
+    const scale = IE.cv.width / (IE.wPt * 200 / 72); // keep pasted images at ~200 dpi of the page
+    iePasteCanvas(c, bm.width * scale, bm.height * scale);
+  } catch { toast('วางรูปไม่สำเร็จ', 'err'); }
+}
+
+// --- tools
+function ieSetTool(t) {
+  if (t !== 'select') ieCommit();
+  IE.tool = t;
+  document.querySelectorAll('#imged [data-tool]').forEach((b) => b.classList.toggle('active', b.dataset.tool === t));
+  ieEl('ieSizeWrap').classList.toggle('hidden', t === 'select');
+  ieEl('ieColors').classList.toggle('hidden', t !== 'pen');
+  ieEl('ieGroupWrap').classList.toggle('hidden', t !== 'select');
+  ieEl('ieStage').dataset.tool = t;
+  ieEl('ieCursor').classList.add('hidden');
+  ieHint();
+}
+function ieHint(msg) {
+  const el = ieEl('ieHint');
+  if (IE.paint) { el.innerHTML = '<b>กำลังแก้ไขใน Paint</b> — แก้เสร็จกด บันทึก (Ctrl+S) ใน Paint แล้วภาพจะอัปเดตที่นี่อัตโนมัติ'; return; }
+  if (msg) { el.textContent = msg; return; }
+  const t = IE.tool;
+  el.textContent = t === 'erase' ? 'ลากเพื่อลบให้เป็นพื้นขาว' : t === 'pen' ? 'ลากเพื่อเขียน' :
+    (IE.float ? 'ลากเพื่อย้าย · ลากมุมขวาล่างเพื่อย่อ/ขยาย · คลิกที่ว่างเพื่อวางลง' : IE.sel ? (IS_TOUCH ? 'แตะปุ่มถังขยะเพื่อลบ · ลากเพื่อย้าย · ลากวงกลมมุมเพื่อย่อ/ขยาย' : 'กด Delete เพื่อลบ · ลากเพื่อย้าย · Shift+คลิก เพื่อเลือกเพิ่ม') :
+      (IS_TOUCH ? 'แตะวัตถุ (เช่น ตรา โลโก้ ข้อความ) เพื่อเลือก หรือลากกรอบ · สองนิ้วเพื่อซูม/เลื่อน' : 'คลิกวัตถุ (เช่น ตรา โลโก้ ข้อความ) เพื่อเลือก หรือลากกรอบเลือกพื้นที่'));
+}
+function ieStroke(a, b) {
+  const g = IE.g; g.save();
+  g.lineCap = g.lineJoin = 'round';
+  const k = IE.cv.width / 1654;
+  g.lineWidth = Math.max(1, (IE.tool === 'pen' ? IE.size / 6 : IE.size) * k);
+  g.strokeStyle = IE.tool === 'pen' ? IE.color : '#fff';
+  g.beginPath(); g.moveTo(a.x, a.y); g.lineTo(b.x + 0.01, b.y); g.stroke(); g.restore();
+}
+function ieShowCursor(e) {
+  const c = ieEl('ieCursor');
+  if (IE.tool !== 'erase' || e.pointerType === 'touch') { c.classList.add('hidden'); return; }
+  const wr = ieEl('ieWrap').getBoundingClientRect(), d = IE.size * (IE.cv.width / 1654) * IE.view;
+  c.classList.remove('hidden');
+  Object.assign(c.style, { width: d + 'px', height: d + 'px', left: e.clientX - wr.left - d / 2 + 'px', top: e.clientY - wr.top - d / 2 + 'px' });
+}
+
+// --- pointer handling (mouse / pen / touch, pinch to zoom)
+function iePointerDown(e) {
+  if (e.button > 0) return;
+  const st = ieEl('ieStage');
+  IE.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  try { st.setPointerCapture(e.pointerId); } catch {}
+  if (IE.pointers.size === 2) { // start pinch / two-finger pan
+    if (IE.op && IE.op.kind === 'rect') ieEl('ieRect').classList.add('hidden');
+    if (IE.op && IE.op.kind === 'stroke' && !IE.op.moved && IE.undo.length) { IE.op = null; }
+    IE.op = null;
+    const [a, b] = [...IE.pointers.values()];
+    IE.pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), view: IE.view, cx: (a.x + b.x) / 2, cy: (a.y + b.y) / 2 };
+    return;
+  }
+  if (IE.pointers.size > 2) return;
+  e.preventDefault();
+  const P = ieToImg(e.clientX, e.clientY);
+  if (IE.tool === 'erase' || IE.tool === 'pen') {
+    ieCommit(); iePushUndo(); ieStroke(P, P); ieChanged();
+    IE.op = { kind: 'stroke', last: P, moved: false };
+    return;
+  }
+  // select tool
+  const s = IE.float || IE.sel;
+  if (s) {
+    const hx = (s.x + s.w) * IE.view, hy = (s.y + s.h) * IE.view, px = P.x * IE.view, py = P.y * IE.view, hr = IS_TOUCH || e.pointerType === 'touch' ? 26 : 12;
+    if (Math.abs(px - hx) < hr && Math.abs(py - hy) < hr) { if (!IE.float) ieLift(); const f = IE.float; if (f) IE.op = { kind: 'resize', start: P, w: f.w, h: f.h }; return; }
+    if (P.x >= s.x && P.y >= s.y && P.x <= s.x + s.w && P.y <= s.y + s.h && !e.shiftKey) {
+      IE.op = { kind: 'move', start: P, ox: s.x, oy: s.y, lifted: !!IE.float, moved: false };
+      return;
+    }
+  }
+  if (!e.shiftKey) ieCommit();
+  IE.op = { kind: 'rect', start: P, cx: e.clientX, cy: e.clientY, moved: false, add: e.shiftKey };
+}
+function iePointerMove(e) {
+  if (IE.pointers.has(e.pointerId)) IE.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+  if (IE.pinch && IE.pointers.size >= 2) {
+    const [a, b] = [...IE.pointers.values()], st = ieEl('ieStage');
+    const d = Math.hypot(a.x - b.x, a.y - b.y), cx = (a.x + b.x) / 2, cy = (a.y + b.y) / 2;
+    const ip = ieToImg(IE.pinch.cx, IE.pinch.cy);
+    IE.view = Math.max(0.05, Math.min(8, IE.pinch.view * d / IE.pinch.d));
+    ieLayout();
+    const cr = IE.cv.getBoundingClientRect();
+    st.scrollLeft += cr.left + ip.x * IE.view - cx; st.scrollTop += cr.top + ip.y * IE.view - cy;
+    IE.pinch.cx = cx; IE.pinch.cy = cy; IE.pinch.d = d; IE.pinch.view = IE.view;
+    return;
+  }
+  ieShowCursor(e);
+  const op = IE.op; if (!op) return;
+  const P = ieToImg(e.clientX, e.clientY);
+  if (op.kind === 'stroke') { ieStroke(op.last, P); op.last = P; op.moved = true; return; }
+  if (op.kind === 'move') {
+    const dx = P.x - op.start.x, dy = P.y - op.start.y;
+    if (!op.moved && Math.hypot(dx, dy) * IE.view < 3) return;
+    if (!op.moved) { op.moved = true; if (!IE.float) ieLift(); if (!IE.float) { IE.op = null; return; } }
+    IE.float.x = op.ox + dx; IE.float.y = op.oy + dy; ieDrawSel(); return;
+  }
+  if (op.kind === 'resize' && IE.float) {
+    const k = Math.max(0.05, Math.max((P.x - IE.float.x) / op.w, (P.y - IE.float.y) / op.h));
+    IE.float.w = op.w * k; IE.float.h = op.h * k; ieDrawSel(); return;
+  }
+  if (op.kind === 'rect') {
+    if (!op.moved && Math.hypot(e.clientX - op.cx, e.clientY - op.cy) < 5) return;
+    op.moved = true;
+    const x = Math.min(op.start.x, P.x), y = Math.min(op.start.y, P.y), w = Math.abs(P.x - op.start.x), h = Math.abs(P.y - op.start.y);
+    Object.assign(ieEl('ieRect').style, { left: x * IE.view + 'px', top: y * IE.view + 'px', width: w * IE.view + 'px', height: h * IE.view + 'px' });
+    ieEl('ieRect').classList.remove('hidden');
+    op.rect = { x: Math.max(0, x), y: Math.max(0, y), w: Math.min(IE.cv.width, x + w) - Math.max(0, x), h: Math.min(IE.cv.height, y + h) - Math.max(0, y) };
+  }
+}
+function iePointerUp(e) {
+  IE.pointers.delete(e.pointerId);
+  if (IE.pinch) { if (IE.pointers.size < 2) IE.pinch = null; IE.op = null; return; }
+  const op = IE.op; IE.op = null; if (!op) return;
+  if (op.kind === 'stroke') { ieChanged(); return; }
+  if (op.kind === 'move' && !op.moved) { ieHint(); return; }
+  if (op.kind === 'rect') {
+    ieEl('ieRect').classList.add('hidden');
+    let s = null;
+    if (op.moved && op.rect && op.rect.w > 2 && op.rect.h > 2) s = { ...op.rect, mask: null };
+    else {
+      s = iePickObject(op.start.x, op.start.y);
+      if (!s) { ieSetSel(op.add ? IE.sel : null); ieHint('ไม่พบวัตถุตรงนี้ — ลองคลิกบนตัววัตถุ หรือลากกรอบเลือกพื้นที่'); return; }
+    }
+    if (op.add && IE.sel) s = ieUnionSel(IE.sel.mask ? IE.sel : { ...IE.sel, mask: new Uint8Array(Math.ceil(IE.sel.w) * Math.ceil(IE.sel.h)).fill(1), mw: Math.ceil(IE.sel.w), mh: Math.ceil(IE.sel.h), f: 1 }, s.mask ? s : { ...s, mask: new Uint8Array(Math.ceil(s.w) * Math.ceil(s.h)).fill(1), mw: Math.ceil(s.w), mh: Math.ceil(s.h), f: 1 });
+    ieSetSel(s);
+  }
+  ieHint();
+}
+
+// --- Edit in Paint (Windows exe only): the picture goes to Paint; every save in Paint comes back here automatically
+async function ieOpenPaint() {
+  if (!host.paint) return;
+  ieCommit();
+  if (IE.paint) ieStopPaint();
+  busy('กำลังเปิด Paint …');
+  try {
+    const blob = await new Promise((res) => IE.cv.toBlob(res, 'image/png'));
+    const r = await (await api('/api/paint/open', { method: 'POST', body: blob })).json();
+    unbusy();
+    if (!r.ok) { toast('เปิด Paint ไม่สำเร็จ: ' + (r.error || ''), 'err', [], 8000); return; }
+    IE.paint = { id: r.id, v: 0, busy: false, timer: setInterval(iePaintPoll, 900) };
+    ieEl('iePaint').classList.add('active');
+    ieHint();
+    toast('เปิดภาพใน Paint แล้ว — แก้ไขแล้วกด บันทึก (Ctrl+S) ใน Paint', 'ok', [], 6000);
+  } catch (e) { unbusy(); toast('เปิด Paint ไม่สำเร็จ: ' + e.message + ' (ต้องใช้ Super PDF เวอร์ชัน 1.7 ขึ้นไป)', 'err', [], 8000); }
+}
+async function iePaintPoll() {
+  const P = IE.paint; if (!P || P.busy || !IE.open) return;
+  P.busy = true;
+  try {
+    const r = await (await api('/api/paint/poll?id=' + P.id)).json();
+    if (r.ok && r.v > P.v) {
+      P.v = r.v;
+      const b = await (await api('/api/paint/file?id=' + P.id)).blob();
+      const bm = await createImageBitmap(b);
+      ieDropFloat(true);
+      iePushUndo();
+      if (bm.width !== IE.cv.width || bm.height !== IE.cv.height) { IE.cv.width = bm.width; IE.cv.height = bm.height; IE.hPt = IE.wPt * bm.height / bm.width; }
+      IE.g.fillStyle = '#fff'; IE.g.fillRect(0, 0, IE.cv.width, IE.cv.height);
+      IE.g.drawImage(bm, 0, 0);
+      ieChanged(); ieSetSel(null); ieLayout();
+      toast('รับภาพที่แก้ใน Paint แล้ว', 'ok', [], 2200);
+    } else if (!r.ok) ieStopPaint();
+  } catch {}
+  P.busy = false;
+}
+function ieStopPaint() {
+  const P = IE.paint; if (!P) return;
+  clearInterval(P.timer); IE.paint = null;
+  ieEl('iePaint').classList.remove('active');
+  api('/api/paint/close?id=' + P.id).catch(() => {});
+  ieHint();
+}
+
+// --- wiring
+(() => {
+  const st = ieEl('ieStage');
+  st.addEventListener('pointerdown', iePointerDown);
+  st.addEventListener('pointermove', iePointerMove);
+  st.addEventListener('pointerup', iePointerUp);
+  st.addEventListener('pointercancel', iePointerUp);
+  st.addEventListener('pointerleave', () => ieEl('ieCursor').classList.add('hidden'));
+  st.addEventListener('wheel', (e) => { if (e.ctrlKey || e.metaKey) { e.preventDefault(); ieZoom(e.deltaY < 0 ? 1.15 : 1 / 1.15, e.clientX, e.clientY); } }, { passive: false });
+  st.addEventListener('contextmenu', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const P = ieToImg(e.clientX, e.clientY), s = IE.float || IE.sel;
+    if (!s || P.x < s.x || P.y < s.y || P.x > s.x + s.w || P.y > s.y + s.h) { if (IE.tool === 'select') { ieCommit(); const o = iePickObject(P.x, P.y); if (o) ieSetSel(o); } }
+    const has = !!(IE.float || IE.sel);
+    showMenu([
+      { label: 'ลบ', icon: 'trash', kbd: 'Delete', danger: true, disabled: !has, action: ieDelete },
+      { label: 'ตัด', icon: 'cut', kbd: 'Ctrl+X', disabled: !has, action: () => ieCopy(true) },
+      { label: 'คัดลอก', icon: 'copy', kbd: 'Ctrl+C', disabled: !has, action: () => ieCopy(false) },
+      { label: 'วาง', icon: 'paste', kbd: 'Ctrl+V', disabled: !IE.clip, action: iePaste },
+      { label: 'ทำสำเนา', icon: 'dup', kbd: 'Ctrl+D', disabled: !has, action: ieDuplicate },
+      { sep: true },
+      { label: 'ลบจุดสกปรก' + (IE.sel ? ' (ในกรอบ)' : ' (ทั้งหน้า)'), icon: 'clean', action: ieDespeckle },
+      { label: 'เลือกทั้งหน้า', icon: 'selall', kbd: 'Ctrl+A', action: () => { ieCommit(); ieSetSel({ x: 0, y: 0, w: IE.cv.width, h: IE.cv.height, mask: null }); } },
+    ], e.clientX, e.clientY);
+  });
+  ieEl('ieClose').onclick = () => closeImageEditor();
+  ieEl('ieApply').onclick = ieApply;
+  ieEl('ieUndo').onclick = ieUndo;
+  ieEl('ieRedo').onclick = ieRedo;
+  document.querySelectorAll('#imged [data-tool]').forEach((b) => { b.onclick = () => ieSetTool(b.dataset.tool); });
+  ieEl('ieSize').oninput = (e) => { IE.size = +e.target.value; };
+  ieEl('ieGroup').oninput = (e) => { IE.group = +e.target.value; IE.ink = null; };
+  document.querySelectorAll('#ieColors .swatch').forEach((b) => { b.onclick = () => { IE.color = b.dataset.c; document.querySelectorAll('#ieColors .swatch').forEach((x) => x.classList.toggle('on', x === b)); }; });
+  ieEl('ieZoomIn').onclick = () => ieZoom(1.25);
+  ieEl('ieZoomOut').onclick = () => ieZoom(1 / 1.25);
+  ieEl('ieZoomFit').onclick = ieFit;
+  ieEl('ieDespeckle').onclick = ieDespeckle;
+  ieEl('ieStrength').oninput = (e) => { IE.strength = +e.target.value; };
+  ieEl('iePaint').onclick = () => (IE.paint ? ieStopPaint() : ieOpenPaint());
+  ieEl('ieDelBtn').onclick = ieDelete;
+  ieEl('ieDupBtn').onclick = ieDuplicate;
+  ieEl('ieCopyBtn').onclick = () => ieCopy(false);
+  ieEl('iePasteBtn').onclick = iePaste;
+  ieEl('ieDoneBtn').onclick = () => { ieCommit(); };
+  window.addEventListener('resize', () => { if (IE.open) ieDrawSel(); });
+
+  // keyboard (only while the editor is open; blocks the document shortcuts underneath)
+  let iePasteHandled = false;
+  window.addEventListener('keydown', (e) => {
+    if (!IE.open || modalOpen()) return;
+    if (typingInField()) return;
+    const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+    let handled = true;
+    if (e.key === 'Delete' || e.key === 'Backspace') ieDelete();
+    else if (c && k === 'z') e.shiftKey ? ieRedo() : ieUndo();
+    else if (c && k === 'y') ieRedo();
+    else if (c && k === 'c') ieCopy(false);
+    else if (c && k === 'x') ieCopy(true);
+    else if (c && k === 'd') ieDuplicate();
+    else if (c && k === 'a') { ieCommit(); ieSetSel({ x: 0, y: 0, w: IE.cv.width, h: IE.cv.height, mask: null }); }
+    else if (c && k === 'v') { iePasteHandled = false; setTimeout(() => { if (!iePasteHandled) iePaste(); }, 150); handled = false; e.stopImmediatePropagation(); return; }
+    else if (c && (e.key === '=' || e.key === '+')) ieZoom(1.25);
+    else if (c && e.key === '-') ieZoom(1 / 1.25);
+    else if (c && k === '0') ieFit();
+    else if (c && k === 's') ieApply();
+    else if (e.key === 'Enter') { if (IE.float || IE.sel) ieCommit(); else ieApply(); }
+    else if (e.key === 'Escape') { if (IE.float) ieCommit(); else if (IE.sel) ieSetSel(null); else closeImageEditor(); }
+    else if (!c && k === 'v') ieSetTool('select');
+    else if (!c && k === 'e') ieSetTool('erase');
+    else if (!c && k === 'p') ieSetTool('pen');
+    else if (e.key.startsWith('Arrow') && (IE.sel || IE.float)) {
+      if (!IE.float) ieLift(); if (!IE.float) return;
+      const dd = (e.shiftKey ? 10 : 1) / Math.max(IE.view, 0.1);
+      if (e.key === 'ArrowLeft') IE.float.x -= dd; if (e.key === 'ArrowRight') IE.float.x += dd;
+      if (e.key === 'ArrowUp') IE.float.y -= dd; if (e.key === 'ArrowDown') IE.float.y += dd;
+      ieDrawSel();
+    } else if (!c) handled = false;
+    if (handled) e.preventDefault();
+    e.stopImmediatePropagation();
+  }, true);
+  for (const ev of ['copy', 'cut']) window.addEventListener(ev, (e) => { if (IE.open && !typingInField()) { e.stopImmediatePropagation(); e.preventDefault(); } }, true);
+  window.addEventListener('paste', async (e) => {
+    if (!IE.open || typingInField()) return;
+    e.stopImmediatePropagation(); e.preventDefault();
+    iePasteHandled = true;
+    const items = [...(e.clipboardData?.items || [])];
+    const img = items.find((it) => it.kind === 'file' && it.type.startsWith('image/'));
+    if (img) { const f = img.getAsFile(); if (f) return iePasteImageBlob(f); }
+    iePaste();
+  }, true);
+})();
+function ieDespeckle() {
+  const s = IE.float ? null : IE.sel;
+  ieCommit();
+  const before = ieSnap();
+  const n = despeckleCanvas(IE.cv, IE.strength, s ? { x: s.x, y: s.y, w: s.w, h: s.h } : null);
+  if (!n) { toast('ไม่พบจุดสกปรก (ลองเพิ่มความแรง)', '', [], 2500); return; }
+  IE.undo.push(before); if (IE.undo.length > IE_MAX_UNDO) IE.undo.shift(); IE.redo = [];
+  ieChanged(); ieUpdateButtons();
+  toast(`ลบจุดสกปรก ${n.toLocaleString()} จุด`, 'ok', [['เลิกทำ', ieUndo]], 3500);
+}
+function imgEditTarget() {
+  if (!D.pages.length) return null;
+  if (mode === 'read') return currentReaderPage();
+  const s = selPages(); return s[0] || null;
+}
+$('btnImgEdit').onclick = () => { const p = imgEditTarget(); if (!p) { toast(D.pages.length ? 'คลิกเลือกหน้าที่ต้องการแก้ไขก่อน' : 'ยังไม่มีเอกสาร'); return; } openImageEditor(p); };
+
+
 // expose for automated testing
-window.__superpdf = { scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; } };
+window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
