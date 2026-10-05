@@ -1,0 +1,5 @@
+Super PDF — Thai OCR components
+- ONNX Runtime Web 1.30.0 (ort.wasm.min.mjs, ort-wasm-simd-threaded.*) — MIT License, (c) Microsoft Corporation
+- PP-OCRv5 mobile text detection (det.onnx) and th_PP-OCRv5_mobile_rec Thai recognition (rec_th.onnx, dict_th.txt)
+  from PaddleOCR (PaddlePaddle) — Apache License 2.0; ONNX conversions as published by the community
+- words_th.txt.gz: Thai word list from PyThaiNLP (pythainlp/corpus/words_th.txt) — CC0-1.0 public domain

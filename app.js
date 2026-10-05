@@ -1,4 +1,4 @@
-// Super PDF v1.1 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
@@ -180,7 +180,7 @@ const pdfjsOpts = () => CDN
   ? { cMapUrl: CDN + 'cmaps/', cMapPacked: true, standardFontDataUrl: CDN + 'standard_fonts/' }
   : PACKED
   ? { CMapReaderFactory: PackedCMapFactory, StandardFontDataFactory: PackedFontFactory, useWorkerFetch: false, cMapUrl: './', cMapPacked: true, standardFontDataUrl: './' }
-  : { cMapUrl: './pdfjs/cmaps/', cMapPacked: true, standardFontDataUrl: './pdfjs/standard_fonts/' };
+  : { cMapUrl: './cmaps/', cMapPacked: true, standardFontDataUrl: './standard_fonts/' };
 
 async function openPdfSource(name, bytes) {
   let retry = false, password;
@@ -851,7 +851,7 @@ function doPaste(at = null) {
 
 // system clipboard integration: keyboard Ctrl+C / Ctrl+X / Ctrl+V
 const typingInField = () => { const a = document.activeElement; return a && (a.tagName === 'INPUT' && a.type !== 'range' && a.type !== 'color' && a.type !== 'checkbox' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable); };
-const modalOpen = () => !$('modal').classList.contains('hidden');
+const modalOpen = () => !$('modal').classList.contains('hidden') || sigOverlayOpen();
 let pendingCut = false, copyHandled = false, pasteHandled = false;
 document.addEventListener('copy', (e) => {
   if (typingInField() || modalOpen() || !D.selected.size) return;
@@ -1060,6 +1060,7 @@ function buildMenu(items) {
 }
 function showMenu(items, x, y) {
   closeMenu();
+  window.__menuAt = Date.now();
   ctxEl = buildMenu(items);
   ctxEl.style.left = '0px'; ctxEl.style.top = '0px';
   document.body.appendChild(ctxEl);
@@ -1075,7 +1076,7 @@ function showMenu(items, x, y) {
     });
   });
 }
-window.addEventListener('mousedown', (e) => { if (ctxEl && !ctxEl.contains(e.target)) closeMenu(); }, true);
+window.addEventListener('mousedown', (e) => { if (ctxEl && !ctxEl.contains(e.target) && Date.now() - (window.__menuAt || 0) > 350) closeMenu(); }, true);
 window.addEventListener('blur', closeMenu);
 window.addEventListener('resize', closeMenu);
 $('organize').addEventListener('scroll', closeMenu, { passive: true });
@@ -1096,6 +1097,7 @@ const convertMenu = () => [
   { label: 'TIFF (1 หน้า = 1 ไฟล์)…', icon: 'img', action: () => convertTiff(false) },
   { label: 'TIFF หลายหน้า (.tiff / .mtiff)…', icon: 'img', action: () => convertTiff(true) },
   { label: 'Word (.docx)…', icon: 'word', disabled: !host.host || !host.word, action: () => convertWord() },
+  { label: 'Word จากเอกสารสแกน (อ่านภาษาไทย)…', icon: 'word', action: () => convertScanWord() },
   { label: 'ข้อความ (.txt)…', icon: 'text', action: () => convertText() },
 ];
 const toTabMenu = () => [
@@ -1108,6 +1110,7 @@ function pageMenu(idx) {
   const hasClip = !!clip;
   return [
     { label: 'เพิ่มข้อความในหน้านี้', icon: 'text', action: () => { setMode('read'); setTimeout(() => { goToPage(idx + 1); setAnnTool(true); }, 80); } },
+    { label: 'ลงลายเซ็น / ตราประทับ…', icon: 'sign', action: () => { setMode('read'); setTimeout(() => { goToPage(idx + 1); setTimeout(() => sigOpenPanel(), 150); }, 80); } },
     { label: n() > 1 ? `เปิดอ่านหน้า ${idx + 1}` : 'เปิดอ่านหน้านี้', icon: 'read', action: () => { setMode('read'); setTimeout(() => goToPage(idx + 1), 60); } },
     { sep: true },
     { label: `คัดลอก${n() > 1 ? ` (${n()} หน้า)` : ''}`, icon: 'copy', kbd: 'Ctrl+C', action: () => menuCopy(false) },
@@ -1167,6 +1170,7 @@ document.addEventListener('contextmenu', (e) => {
   if (annEl2 && !annEl2.classList.contains('editing')) {
     const L = annEl2.closest('.annlayer'); const p = D.pages[+L.dataset.i];
     selectAnn({ uid: p.uid, id: annEl2.dataset.id });
+    if (annEl2.classList.contains('annimg')) { showMenu(sigAnnMenu(), e.clientX, e.clientY); return; }
     showMenu([
       { label: 'แก้ไขข้อความ', icon: 'text', kbd: 'Enter', action: startEdit },
       { sep: true },
@@ -1189,7 +1193,8 @@ document.addEventListener('contextmenu', (e) => {
     const idx = card ? D.pages.findIndex((p) => p.uid === card.dataset.uid) : +rpage.dataset.i;
     const u = D.pages[idx].uid;
     if (!D.selected.has(u)) { D.selected = new Set([u]); D.lastClicked = u; paintSelection(); }
-    showMenu(pageMenu(idx), e.clientX, e.clientY);
+    const L2 = !card && rpage.querySelector('.annlayer');
+    showMenu(L2 ? [...sigPointMenu(L2, e), { sep: true }, ...pageMenu(idx)] : pageMenu(idx), e.clientX, e.clientY);
   } else if (e.target.closest('#organize, #reader')) {
     showMenu(emptyAreaMenu(), e.clientX, e.clientY);
   }
@@ -1520,6 +1525,11 @@ function annMetrics(a) { // in pt
 }
 // draw annotation text onto a 2D context already scaled so that 1 unit = 1 pt of base space
 function paintAnn(g, a) {
+  if (a.kind === 'img') { // signature / stamp picture
+    const im = sigFinal(a);
+    if (im) { g.save(); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.translate(a.x, a.y); if (a.r) g.rotate(a.r * Math.PI / 180); g.drawImage(im, 0, 0, a.w, a.h); g.restore(); }
+    return null;
+  }
   const m = annMetrics(a);
   g.save(); g.translate(a.x, a.y); if (a.r) g.rotate(a.r * Math.PI / 180);
   g.font = annFont(a, a.size); g.fillStyle = a.color; g.textBaseline = 'alphabetic';
@@ -1551,6 +1561,7 @@ async function embedAnnots(out, pdfPage, p) {
   const vb = pg.getViewport({ scale: 1, rotation: pg.rotate });
   const R = pg.rotate || 0;
   for (const a of p.annots) {
+    if (a.kind === 'img') { await embedSigAnn(out, pdfPage, a, vb, R); continue; }
     if (!a.text || !a.text.trim()) continue;
     const m = annMetrics(a), K = 4;
     const c = document.createElement('canvas'); c.width = Math.ceil(m.w * K); c.height = Math.ceil(m.h * K);
@@ -1598,6 +1609,7 @@ function renderAnnLayer(L) {
   if (annEditing && annSel && annSel.uid === p.uid && L.querySelector('.annot.editing')) return; // don't disturb typing
   L.classList.toggle('tool', annTool);
   L.replaceChildren(...(p.annots || []).map((a) => {
+    if (a.kind === 'img') return sigAnnEl(a, s, !!(annSel && annSel.id === a.id));
     const el = document.createElement('div');
     el.className = 'annot' + (annSel && annSel.id === a.id ? ' selected' : '');
     el.dataset.id = a.id;
@@ -1617,6 +1629,7 @@ function selectAnn(sel, edit = false) {
 }
 function annEl(sel) { return sel && document.querySelector(`.annlayer .annot[data-id="${sel.id}"]`); }
 function startEdit() {
+  if ((findAnn(annSel) || {}).kind === 'img') { sigOpenProps(); return; }
   const el = annEl(annSel); if (!el) return;
   const a = findAnn(annSel);
   annEditing = true;
@@ -1668,6 +1681,7 @@ $('readerPages').addEventListener('pointerdown', (e) => {
   const p = D.pages[+L.dataset.i];
   const el = e.target.closest('.annot');
   if (el && el.classList.contains('editing')) return;            // let the caret move
+  if (el && el.classList.contains('annimg')) { sigPointerDown(e, L, p, el); return; }
   if (!el) {
     if (annEditing) { document.activeElement.blur(); }
     if (annTool) {
@@ -1681,7 +1695,7 @@ $('readerPages').addEventListener('pointerdown', (e) => {
       a.r = r;
       annTool = false; // one box per click of the tool (like Acrobat "Add text")
       selectAnn({ uid: p.uid, id: a.id }, true);
-    } else if (annSel) selectAnn(null);
+    } else if (annSel) { selectAnn(null); sigCloseProps(); }
     return;
   }
   e.preventDefault();
@@ -1737,9 +1751,10 @@ function deleteAnn() {
 function copyAnn(cut) {
   const a = findAnn(annSel); if (!a) return;
   annClip = { ann: { ...a }, marker: 'SuperPDF-text-' + (seq++) };
-  try { navigator.clipboard.writeText(annClip.marker); } catch {}
+  try { navigator.clipboard.writeText(annClip.marker).catch(() => {}); } catch {}
   if (cut) deleteAnn();
-  toast(cut ? 'ตัดกล่องข้อความแล้ว' : 'คัดลอกกล่องข้อความแล้ว — กด Ctrl+V เพื่อวาง (วางหน้าอื่น/แท็บอื่นได้)', '', [], 2500);
+  const what = a.kind === 'img' ? sigKindName(a.sk) : 'กล่องข้อความ';
+  toast(cut ? `ตัด${what}แล้ว` : `คัดลอก${what}แล้ว — กด Ctrl+V เพื่อวาง (วางหน้าอื่น/แท็บอื่นได้)`, '', [], 2500);
 }
 function currentReaderPage() {
   if (annSel && pageByUid(annSel.uid)) return pageByUid(annSel.uid);
@@ -1768,7 +1783,7 @@ function pasteAnn(textOverride) {
 function applyAnnStyle(patch) {
   Object.assign(annDefaults, patch);
   const a = findAnn(annSel);
-  if (a) { pushUndo(); Object.assign(a, patch); touchPage(pageByUid(annSel.uid)); annEditing = false; refresh(); }
+  if (a && a.kind !== 'img') { pushUndo(); Object.assign(a, patch); touchPage(pageByUid(annSel.uid)); annEditing = false; refresh(); }
   updateAnnBar();
 }
 function setAnnTool(on) { annTool = on; if (on && mode !== 'read') setMode('read'); renderAllAnnLayers(); updateAnnBar(); }
@@ -1777,8 +1792,9 @@ function setAnnTool(on) { annTool = on; if (on && mode !== 'read') setMode('read
 function updateAnnBar() {
   const bar = $('annbar'); if (!bar) return;
   bar.classList.toggle('hidden', mode !== 'read' || !D.pages.length);
-  const a = findAnn(annSel) || annDefaults;
+  const a0 = findAnn(annSel), a = (a0 && a0.kind !== 'img' && a0) || annDefaults;
   $('annTool').classList.toggle('active', annTool);
+  if (mode !== 'read') { sigClosePanel(); sigCloseProps(); } else sigPropsSync();
   if (document.activeElement !== $('annFont')) {
     if (![...$('annFont').options].some((o) => o.value === a.font)) $('annFont').insertAdjacentHTML('afterbegin', `<option>${esc(a.font)}</option>`);
     $('annFont').value = a.font;
@@ -1790,7 +1806,7 @@ function updateAnnBar() {
   const has = !!findAnn(annSel);
   for (const id of ['annDel', 'annCopy', 'annCut', 'annDup']) $(id).disabled = !has;
   $('annPaste').disabled = !annClip;
-  $('annHint').textContent = annTool ? 'คลิกบนหน้าเพื่อวางข้อความ' : has ? 'ลากเพื่อย้าย · คลิกอีกครั้ง/ดับเบิลคลิกเพื่อแก้ข้อความ' : '';
+  $('annHint').textContent = annTool ? 'คลิกบนหน้าเพื่อวางข้อความ' : (a0 && a0.kind === 'img') ? 'ลากเพื่อย้าย · ลากปุ่มมุมขวาล่างเพื่อย่อ-ขยาย/หมุน · ⋯ = สี/ความหนา' : has ? 'ลากเพื่อย้าย · คลิกอีกครั้ง/ดับเบิลคลิกเพื่อแก้ข้อความ' : IS_TOUCH ? '' : 'คลิกขวาบนหน้า = วางลายเซ็น/ตรา/วันที่ตรงจุดนั้น';
   $('annUndo').disabled = !D.undo.length; $('annRedo').disabled = !D.redo.length;
 }
 async function loadFontList() {
@@ -1832,6 +1848,7 @@ window.addEventListener('keydown', (e) => {
   const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
   const a = findAnn(annSel);
   if (!c && !e.altKey && k === 't') { e.preventDefault(); setAnnTool(!annTool); return; }
+  if (!c && !e.altKey && k === 's' && !a) { e.preventDefault(); $('annSig').click(); return; }
   if (!a) { if (e.key === 'Escape' && annTool) setAnnTool(false); return; }
   let handled = true;
   if (c && k === 'c') copyAnn(false);
@@ -1839,7 +1856,7 @@ window.addEventListener('keydown', (e) => {
   else if (c && k === 'd') { copyAnn(false); pasteAnn(); }
   else if (e.key === 'Delete' || e.key === 'Backspace') deleteAnn();
   else if (e.key === 'Enter' || e.key === 'F2') startEdit();
-  else if (e.key === 'Escape') selectAnn(null);
+  else if (e.key === 'Escape') { selectAnn(null); sigCloseProps(); }
   else if (e.key.startsWith('Arrow')) {
     const d = e.shiftKey ? 10 : 1;
     pushUndo();
@@ -3221,8 +3238,1611 @@ function imgEditTarget() {
 $('btnImgEdit').onclick = () => { const p = imgEditTarget(); if (!p) { toast(D.pages.length ? 'คลิกเลือกหน้าที่ต้องการแก้ไขก่อน' : 'ยังไม่มีเอกสาร'); return; } openImageEditor(p); };
 
 
+// ------------------------------------------------------------------ v1.8 signatures & stamps (ลายเซ็น / ตราประทับ)
+// Library items are transparent PNGs (ink only). Windows exe: files in %LOCALAPPDATA%\SuperPDF\signatures (via /api/sig/*);
+// web / iPhone: IndexedDB of this site. Placed on a page as an annotation { kind:'img', sk, base, x, y, w, h, r, color, weight }
+// and saved into the PDF as a transparent image on top of the original page (the page itself is not rasterised).
+const SIG = {
+  items: null,          // [{ id, kind:'sig'|'stamp', w, h, t, v }]
+  thumbs: new Map(),    // id:v -> object URL
+  base: new Map(),      // base key -> canvas (RGBA, transparent background)
+  fin: new Map(),       // base|color|weight -> { c: canvas, url }
+  tab: 'sig',
+  target: null,         // { p, pt } where the next library item should go
+  props: null,          // { undo: bool } while the colour / thickness sheet is open
+};
+const SIG_COLORS = [null, '#000000', '#1435c8', '#d92d20', '#ffffff', '#7a3b0c', '#f97316', '#eab308', '#067647', '#7c3aed'];
+const sigKindName = (k) => (k === 'stamp' ? 'ตราประทับ' : 'ลายเซ็น');
+const sigOverlayOpen = () => !!document.querySelector('.sigfull:not(.hidden)');
+
+// ---- storage
+const sigStore = (() => {
+  const viaHost = () => !!(host.host && host.sig);
+  const req = (r) => new Promise((res, rej) => { r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  let dbp = null;
+  const db = () => (dbp ||= new Promise((res, rej) => {
+    const r = indexedDB.open('superpdf-signatures', 1);
+    r.onupgradeneeded = () => r.result.createObjectStore('items', { keyPath: 'id' });
+    r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error);
+  }));
+  const os = async (mode) => (await db()).transaction('items', mode).objectStore('items');
+  let persisted = false;
+  const persist = () => { if (persisted) return; persisted = true; try { navigator.storage && navigator.storage.persist && navigator.storage.persist(); } catch {} };
+  async function hostIndex() {
+    const names = await (await api('/api/sig/list')).json();
+    let items = [];
+    if (names.includes('index.json')) { try { items = (await (await api('/api/sig/get?name=index.json')).json()).items || []; } catch { items = []; } }
+    return { names, items };
+  }
+  const hostSaveIndex = (items) => api('/api/sig/put?name=index.json', { method: 'POST', body: JSON.stringify({ app: 'Super PDF', format: 1, items }, null, 1) });
+  const clean = (m) => ({ id: m.id, kind: m.kind === 'stamp' ? 'stamp' : 'sig', w: m.w | 0, h: m.h | 0, t: +m.t || Date.now(), v: +m.v || 1 });
+  return {
+    where() { return viaHost() ? 'ในเครื่องนี้ (โฟลเดอร์ %LOCALAPPDATA%\\SuperPDF\\signatures)' : 'ในเครื่องนี้ (ที่เก็บข้อมูลของแอปบนอุปกรณ์นี้)'; },
+    async list() {
+      let L;
+      if (viaHost()) { const { names, items } = await hostIndex(); L = items.filter((it) => names.includes(it.id + '.png')); }
+      else L = (await req((await os('readonly')).getAll())).map(({ png, ...m }) => m);
+      return L.map(clean).sort((a, b) => b.t - a.t);
+    },
+    async png(id) {
+      if (viaHost()) return await (await api('/api/sig/get?name=' + id + '.png')).blob();
+      const r = await req((await os('readonly')).get(id));
+      return r ? r.png : null;
+    },
+    async put(meta, blob) {
+      meta = clean(meta);
+      if (viaHost()) {
+        if (blob) await api('/api/sig/put?name=' + meta.id + '.png', { method: 'POST', body: blob });
+        const { items } = await hostIndex();
+        await hostSaveIndex([...items.filter((x) => x.id !== meta.id), meta]);
+        return;
+      }
+      if (!blob) blob = await this.png(meta.id);
+      await req((await os('readwrite')).put({ ...meta, png: blob }));
+      persist();
+    },
+    async del(id) {
+      if (viaHost()) {
+        const { items } = await hostIndex();
+        await hostSaveIndex(items.filter((x) => x.id !== id));
+        await api('/api/sig/del?name=' + id + '.png', { method: 'POST' });
+        return;
+      }
+      await req((await os('readwrite')).delete(id));
+    },
+  };
+})();
+const sigNewId = () => 's' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+
+async function sigLoadLibrary(force = false) {
+  if (SIG.items && !force) return SIG.items;
+  try { SIG.items = await sigStore.list(); }
+  catch (e) { SIG.items = []; toast('เปิดคลังลายเซ็นไม่ได้: ' + e.message, 'err'); }
+  return SIG.items;
+}
+async function sigThumb(it) {
+  const k = it.id + ':' + it.v;
+  if (!SIG.thumbs.has(k)) {
+    const b = await sigStore.png(it.id);
+    SIG.thumbs.set(k, b ? URL.createObjectURL(b) : '');
+  }
+  return SIG.thumbs.get(k);
+}
+// library item -> base key (decoded canvas kept for the session; earlier versions stay valid for objects already placed)
+async function sigEnsureBase(it) {
+  const key = 'L' + it.id + 'v' + it.v;
+  if (SIG.base.has(key)) return key;
+  const url = await sigThumb(it);
+  const im = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej(new Error('อ่านภาพไม่ได้')); i.src = url; });
+  const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight;
+  c.getContext('2d').drawImage(im, 0, 0);
+  SIG.base.set(key, c);
+  return key;
+}
+async function sigAddToLibrary(canvas, kind) {
+  const blob = await new Promise((r) => canvas.toBlob(r, 'image/png'));
+  const meta = { id: sigNewId(), kind, w: canvas.width, h: canvas.height, t: Date.now(), v: 1 };
+  await sigStore.put(meta, blob);
+  SIG.thumbs.set(meta.id + ':1', URL.createObjectURL(blob));
+  const key = 'L' + meta.id + 'v1';
+  SIG.base.set(key, canvas);
+  await sigLoadLibrary(true);
+  return SIG.items.find((x) => x.id === meta.id) || meta;
+}
+
+// ---- appearance: colour + stroke thickness, computed from the base image (cached)
+function sigMorph(A, W, H, r, isMax) { // separable square max/min filter, radius r (px)
+  if (r <= 0) return A;
+  const T = new Float32Array(W * H), O = new Float32Array(W * H);
+  for (let y = 0; y < H; y++) {
+    const row = y * W;
+    for (let x = 0; x < W; x++) {
+      let v = isMax ? 0 : 1;
+      const x0 = Math.max(0, x - r), x1 = Math.min(W - 1, x + r);
+      for (let k = x0; k <= x1; k++) { const a = A[row + k]; if (isMax ? a > v : a < v) v = a; }
+      T[row + x] = v;
+    }
+  }
+  for (let x = 0; x < W; x++) {
+    for (let y = 0; y < H; y++) {
+      let v = isMax ? 0 : 1;
+      const y0 = Math.max(0, y - r), y1 = Math.min(H - 1, y + r);
+      for (let k = y0; k <= y1; k++) { const a = T[k * W + x]; if (isMax ? a > v : a < v) v = a; }
+      O[y * W + x] = v;
+    }
+  }
+  return O;
+}
+// typical stroke width (px) ≈ 2 · ink area / ink outline length; cached per picture
+function sigStrokeWidth(src, A, W, H) {
+  if (src.__sw) return src.__sw;
+  let area = 0, edge = 0;
+  for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+    const i = y * W + x; if (A[i] < 0.5) continue;
+    area++;
+    if (A[i - 1] < 0.5 || A[i + 1] < 0.5 || A[i - W] < 0.5 || A[i + W] < 0.5) edge++;
+  }
+  src.__sw = Math.max(1.5, Math.min(40, edge ? 2 * area / edge : 3));
+  return src.__sw;
+}
+function sigStyle(src, color, weight) {
+  const W = src.width, H = src.height;
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.drawImage(src, 0, 0);
+  if (!color && !weight) return c;
+  const img = g.getImageData(0, 0, W, H), d = img.data, N = W * H;
+  const A0 = new Float32Array(N);
+  for (let i = 0; i < N; i++) A0[i] = d[i * 4 + 3] / 255;
+  let A = A0;
+  if (weight) {
+    const unit = sigStrokeWidth(src, A0, W, H) * (weight > 0 ? 0.28 : 0.2);   // relative to this picture's own stroke width
+    const r = Math.abs(weight) * unit, ri = Math.floor(r), fr = r - ri;
+    const m1 = sigMorph(A0, W, H, ri, weight > 0), m2 = sigMorph(A0, W, H, ri + 1, weight > 0);
+    A = new Float32Array(N);
+    for (let i = 0; i < N; i++) {
+      let a = m1[i] + (m2[i] - m1[i]) * fr;
+      if (weight > 0) a = 1 - Math.pow(1 - a, 1 + 0.45 * weight);                    // thicker & darker
+      else a = Math.max(a, A0[i] * 0.3) * (1 + 0.2 * weight);                       // thinner & lighter
+      A[i] = a;
+    }
+  }
+  let cr, cg, cb;
+  if (color) { cr = parseInt(color.slice(1, 3), 16); cg = parseInt(color.slice(3, 5), 16); cb = parseInt(color.slice(5, 7), 16); }
+  else { // keep the ink's own colours; pixels that only exist after thickening take the average ink colour
+    let sr = 0, sg = 0, sb = 0, sw = 0;
+    for (let i = 0; i < N; i++) { const w = A0[i]; if (w > 0.3) { sr += d[i * 4] * w; sg += d[i * 4 + 1] * w; sb += d[i * 4 + 2] * w; sw += w; } }
+    cr = sw ? sr / sw : 0; cg = sw ? sg / sw : 0; cb = sw ? sb / sw : 0;
+  }
+  for (let i = 0, j = 0; i < N; i++, j += 4) {
+    if (!color) { const k = Math.min(1, A0[i] * 2); d[j] = cr + (d[j] - cr) * k; d[j + 1] = cg + (d[j + 1] - cg) * k; d[j + 2] = cb + (d[j + 2] - cb) * k; }
+    else { d[j] = cr; d[j + 1] = cg; d[j + 2] = cb; }
+    d[j + 3] = Math.max(0, Math.min(255, Math.round(A[i] * 255)));
+  }
+  g.putImageData(img, 0, 0);
+  return c;
+}
+const sigFinKey = (a) => a.base + '|' + (a.color || '') + '|' + (+(a.weight || 0)).toFixed(1);
+function sigFinalEntry(a) {
+  const k = sigFinKey(a);
+  let e = SIG.fin.get(k);
+  if (!e) {
+    const b = SIG.base.get(a.base); if (!b) return null;
+    e = { c: sigStyle(b, a.color, +(a.weight || 0)), url: '' };
+    SIG.fin.set(k, e);
+    if (SIG.fin.size > 80) { const first = SIG.fin.keys().next().value; if (first !== k) SIG.fin.delete(first); }
+  }
+  return e;
+}
+function sigFinal(a) { const e = sigFinalEntry(a); return e && e.c; }
+function sigFinalUrl(a) { const e = sigFinalEntry(a); if (!e) return ''; if (!e.url) e.url = e.c.toDataURL('image/png'); return e.url; }
+async function embedSigAnn(out, pdfPage, a, vb, R) {
+  const im = sigFinal(a); if (!im) return;
+  if (!out.__sigImgs) out.__sigImgs = new Map();
+  const k = sigFinKey(a);
+  let emb = out.__sigImgs.get(k);
+  if (!emb) { emb = await out.embedPng(await canvasToBytes(im, 'image/png')); out.__sigImgs.set(k, emb); }
+  const rot = ((R - (a.r || 0)) % 360 + 360) % 360;
+  const [px, py] = vb.convertToPdfPoint(...annLocal(a, 0, a.h));
+  pdfPage.drawImage(emb, { x: px, y: py, width: a.w, height: a.h, rotate: degrees(rot) });
+}
+
+// ---- placed objects on the reader page
+const SIG_ICON = { del: '<svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg>', more: '<svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3" fill="currentColor"/><circle cx="12" cy="12" r="1.3" fill="currentColor"/><circle cx="19" cy="12" r="1.3" fill="currentColor"/></svg>', rs: '<svg viewBox="0 0 24 24"><path d="M7 7l10 10M7 7h5M7 7v5M17 17h-5M17 17v-5"/></svg>' };
+function sigAnnEl(a, s, selected) {
+  const el = document.createElement('div');
+  el.className = 'annot annimg' + (selected ? ' selected' : '');
+  el.dataset.id = a.id;
+  Object.assign(el.style, { left: a.x * s + 'px', top: a.y * s + 'px', width: a.w * s + 'px', height: a.h * s + 'px', transform: a.r ? `rotate(${a.r}deg)` : '', transformOrigin: '0 0' });
+  const url = sigFinalUrl(a);
+  if (url) { const im = new Image(); im.src = url; im.draggable = false; im.alt = ''; el.appendChild(im); }
+  if (selected) {
+    for (const h of ['del', 'more', 'rs']) {
+      const b = document.createElement('span'); b.className = 'ah ah' + h; b.dataset.h = h; b.innerHTML = SIG_ICON[h];
+      b.title = { del: 'ลบออกจากหน้า', more: 'ปรับสี / ความหนา', rs: 'ลากเพื่อย่อ-ขยาย และหมุน' }[h];
+      el.appendChild(b);
+    }
+  }
+  return el;
+}
+function sigSetBox(el, a, s) {
+  Object.assign(el.style, { left: a.x * s + 'px', top: a.y * s + 'px', width: a.w * s + 'px', height: a.h * s + 'px', transform: a.r ? `rotate(${a.r}deg)` : '' });
+}
+const sigCenter = (a) => annLocal(a, a.w / 2, a.h / 2);
+function sigPlaceCenter(a, c) { // move a so that its centre is at c (base pt), keeping a.r
+  const t = (a.r || 0) * Math.PI / 180, hw = a.w / 2, hh = a.h / 2;
+  a.x = c[0] - (hw * Math.cos(t) - hh * Math.sin(t));
+  a.y = c[1] - (hw * Math.sin(t) + hh * Math.cos(t));
+}
+function sigPointerDown(e, L, p, el) {
+  e.preventDefault();
+  if (annEditing) document.activeElement.blur();
+  const sel = { uid: p.uid, id: el.dataset.id };
+  const h = e.target.closest('.ah') ? e.target.closest('.ah').dataset.h : null;
+  if (h === 'del') { annSel = sel; sigCloseProps(); deleteAnn(); return; }
+  if (h === 'more') { selectAnn(sel); sigOpenProps(); return; }
+  if (!annSel || annSel.id !== sel.id) { selectAnn(sel); if (SIG.props) sigOpenProps(); }
+  const a = findAnn(sel); if (!a) return;
+  const s = +L.dataset.scale;
+  const box = annEl(sel); if (!box) return;
+  try { box.setPointerCapture(e.pointerId); } catch {}
+  const [sx, sy] = annPoint(L, e);
+  const o = { x: a.x, y: a.y, w: a.w, h: a.h, r: a.r || 0 };
+  const C = sigCenter(a);
+  const v0 = [sx - C[0], sy - C[1]], d0 = Math.hypot(...v0) || 1, ang0 = Math.atan2(v0[1], v0[0]);
+  const bw = L.offsetWidth / s, bh = L.offsetHeight / s;
+  let moved = false;
+  const R = $('reader');
+  let last = e, vy = 0, raf = 0;
+  const place = (ev) => {
+    const [mx, my] = annPoint(L, ev);
+    if (!moved && Math.hypot(mx - sx, my - sy) * s < 3) return;
+    if (!moved) { moved = true; pushUndo(); }
+    if (h === 'rs') {
+      const v = [mx - C[0], my - C[1]];
+      const k = Math.hypot(...v) / d0;
+      let r = o.r + (Math.atan2(v[1], v[0]) - ang0) * 180 / Math.PI;
+      r = ((r % 360) + 360) % 360;
+      const snap = Math.round(r / 90) * 90; if (Math.abs(r - snap) < 3) r = snap % 360;
+      const nw = Math.max(10, Math.min(Math.max(bw, bh) * 1.5, o.w * k));
+      a.w = nw; a.h = o.h * nw / o.w; a.r = r;
+      sigPlaceCenter(a, C);
+    } else {
+      const c0 = [C[0] + (mx - sx), C[1] + (my - sy)];
+      sigPlaceCenter(a, [Math.max(0, Math.min(bw, c0[0])), Math.max(0, Math.min(bh, c0[1]))]);
+    }
+    sigSetBox(box, a, s);
+  };
+  const tick = () => { raf = 0; if (!vy) return; R.scrollTop += vy; place(last); raf = requestAnimationFrame(tick); };
+  const move = (ev) => {
+    if (ev.pointerId !== e.pointerId) return;
+    ev.preventDefault(); last = ev; place(ev);
+    if (h === 'rs') return;
+    const rr = R.getBoundingClientRect(), edge = 56;
+    vy = !moved ? 0 : ev.clientY > rr.bottom - edge ? Math.min(18, (ev.clientY - (rr.bottom - edge)) / 3 + 2)
+      : ev.clientY < rr.top + edge ? -Math.min(18, ((rr.top + edge) - ev.clientY) / 3 + 2) : 0;
+    if (vy && !raf) raf = requestAnimationFrame(tick);
+  };
+  const up = (ev) => {
+    if (ev && ev.pointerId !== e.pointerId) return;
+    vy = 0; if (raf) cancelAnimationFrame(raf);
+    window.removeEventListener('pointermove', move); window.removeEventListener('pointerup', up); window.removeEventListener('pointercancel', up);
+    if (moved) { touchPage(p); refresh(); }
+  };
+  window.addEventListener('pointermove', move, { passive: false }); window.addEventListener('pointerup', up); window.addEventListener('pointercancel', up);
+}
+function sigAnnMenu() {
+  const a = findAnn(annSel);
+  return [
+    { label: 'ปรับสี / ความหนา…', icon: 'edit', kbd: 'Enter', action: sigOpenProps },
+    { label: 'หมุน 90° ตามเข็ม', icon: 'rr', action: () => sigRotateSel(90) },
+    { label: 'หมุน 90° ทวนเข็ม', icon: 'rl', action: () => sigRotateSel(-90) },
+    { sep: true },
+    { label: 'คัดลอก', icon: 'copy', kbd: 'Ctrl+C', action: () => copyAnn(false) },
+    { label: 'ตัด', icon: 'cut', kbd: 'Ctrl+X', action: () => copyAnn(true) },
+    { label: 'วาง', icon: 'paste', kbd: 'Ctrl+V', disabled: !annClip, action: () => pasteAnn() },
+    { label: 'ทำสำเนา', icon: 'dup', kbd: 'Ctrl+D', action: () => { copyAnn(false); pasteAnn(); } },
+    { sep: true },
+    { label: `ลบ${a ? sigKindName(a.sk) : ''}ออกจากหน้า`, icon: 'trash', kbd: 'Delete', danger: true, action: () => { sigCloseProps(); deleteAnn(); } },
+  ];
+}
+function sigRotateSel(d) {
+  const a = findAnn(annSel); if (!a) return;
+  pushUndo();
+  const C = sigCenter(a); a.r = (((a.r || 0) + d) % 360 + 360) % 360; sigPlaceCenter(a, C);
+  touchPage(pageByUid(annSel.uid)); refresh();
+}
+
+// ---- colour / thickness sheet
+function sigOpenProps() {
+  const a = findAnn(annSel); if (!a || a.kind !== 'img') return;
+  sigClosePanel();
+  SIG.props = { undo: false };
+  $('sigWeight').value = +(a.weight || 0);
+  sigPropsSync();
+  $('sigProps').classList.remove('hidden');
+  document.body.classList.add('sigsheet');
+}
+function sigCloseProps() { SIG.props = null; $('sigProps').classList.add('hidden'); if (!$('sigPanel') || $('sigPanel').classList.contains('hidden')) document.body.classList.remove('sigsheet'); }
+function sigPropsSync() {
+  const a = findAnn(annSel);
+  if (!a || a.kind !== 'img') { if (SIG.props) sigCloseProps(); return; }
+  const w = +(a.weight || 0);
+  $('sigWeightVal').textContent = (w > 0 ? '+' : '') + w.toFixed(1);
+  $('sigColors').querySelectorAll('button').forEach((b) => b.classList.toggle('on', (b.dataset.c || null) === (a.color || null)));
+}
+function sigApplyProps(patch) {
+  const a = findAnn(annSel); if (!a || a.kind !== 'img') return;
+  if (!SIG.props) SIG.props = { undo: false };
+  if (!SIG.props.undo) { pushUndo(); SIG.props.undo = true; }
+  const all = $('sigAll').checked;
+  const targets = [];
+  for (const p of D.pages) for (const x of p.annots || []) if (x === a || (all && x.kind === 'img' && x.sk === a.sk)) targets.push([p, x]);
+  const touched = new Set();
+  for (const [p, x] of targets) { Object.assign(x, patch); touched.add(p); }
+  touched.forEach(touchPage);
+  renderAllAnnLayers(); sigPropsSync(); updateStatus();
+  clearTimeout(SIG.thumbT); SIG.thumbT = setTimeout(() => { if (mode === 'organize') renderGrid(); }, 400);
+}
+
+// ---- library panel (bottom sheet)
+async function sigOpenPanel(kind, target) {
+  if (!D.pages.length) { toast('เปิดเอกสารก่อน แล้วจึงลงลายเซ็น'); return; }
+  if (mode !== 'read') { setMode('read'); await new Promise((r) => setTimeout(r, 120)); }
+  if (annTool) setAnnTool(false);
+  sigCloseProps();
+  if (kind) SIG.tab = kind;
+  SIG.target = target || null;
+  $('sigPanel').classList.remove('hidden');
+  document.body.classList.add('sigsheet');
+  $('annSig').classList.add('active');
+  await sigRenderPanel();
+}
+function sigClosePanel() {
+  if (!$('sigPanel')) return;
+  $('sigPanel').classList.add('hidden');
+  if (!SIG.props) document.body.classList.remove('sigsheet');
+  $('annSig').classList.remove('active');
+  SIG.target = null;
+}
+async function sigRenderPanel() {
+  $('sigPanel').querySelectorAll('.sigtabs button').forEach((b) => b.classList.toggle('on', b.dataset.k === SIG.tab));
+  const list = $('sigList');
+  const items = (await sigLoadLibrary()).filter((it) => it.kind === SIG.tab);
+  const add = document.createElement('button');
+  add.className = 'sigadd'; add.innerHTML = '<span>+</span>เพิ่ม'; add.title = 'เพิ่ม' + sigKindName(SIG.tab) + 'ใหม่: วาด / สแกน / นำเข้ารูป';
+  add.onclick = (e) => { const r = add.getBoundingClientRect(); sigAddMenu(SIG.tab, r.left, r.top - 8, true); };
+  const tiles = await Promise.all(items.map(async (it) => {
+    const b = document.createElement('button');
+    b.className = 'sigitem'; b.dataset.id = it.id; b.title = 'แตะเพื่อวางลงหน้า · คลิกขวา/กดค้างเพื่อแก้ไขหรือลบ';
+    const im = new Image(); im.src = await sigThumb(it); im.alt = ''; im.draggable = false; b.appendChild(im);
+    return b;
+  }));
+  list.replaceChildren(add, ...tiles);
+  $('sigHint').textContent = items.length ? (SIG.target ? 'แตะเพื่อวางตรงจุดที่เลือกไว้' : 'แตะเพื่อวางลงหน้าที่กำลังอ่าน · คลิกขวา/กดค้างที่รายการเพื่อแก้ไขหรือลบ')
+    : `ยังไม่มี${sigKindName(SIG.tab)}ในคลัง — กด “+ เพิ่ม” เพื่อวาด สแกน หรือนำเข้ารูป`;
+}
+function sigAddMenu(kind, x, y, above) {
+  const items = [
+    { head: 'เพิ่ม' + sigKindName(kind) },
+    { label: 'วาด', icon: 'pen', action: () => sigOpenDraw(kind) },
+    { label: IS_TOUCH ? 'สแกน (ถ่ายรูปจากกระดาษ)' : 'สแกน / ถ่ายรูป', icon: 'camera', action: () => sigPickImage(kind, true) },
+    { label: 'นำเข้า (เลือกรูปในเครื่อง)', icon: 'img', action: () => sigPickImage(kind, false) },
+  ];
+  showMenu(items, x, y);
+  if (above && ctxEl) ctxEl.style.top = Math.max(4, y - ctxEl.offsetHeight) + 'px';
+}
+function sigItemMenu(it, x, y) {
+  showMenu([
+    { label: 'วางลงหน้า', icon: 'check', action: () => sigPlace(it) },
+    { label: 'แก้ไข (ตัดกรอบ / ลบส่วนเกิน)…', icon: 'erase', action: () => sigEditItem(it) },
+    { label: it.kind === 'stamp' ? 'ย้ายไปแท็บลายเซ็น' : 'ย้ายไปแท็บตราประทับ', icon: 'tab', action: () => sigMoveItem(it) },
+    { sep: true },
+    { label: 'ลบออกจากคลัง…', icon: 'trash', danger: true, action: () => sigDeleteItem(it) },
+  ], x, y);
+}
+async function sigDeleteItem(it) {
+  const r = await dialog({ title: 'ลบออกจากคลัง', body: `<p>ยืนยันจะลบ${sigKindName(it.kind)}นี้ออกจากคลังหรือไม่?</p><p class="hint">${sigKindName(it.kind)}ที่วางไว้บนเอกสารแล้วจะยังอยู่ตามเดิม</p>`, buttons: [['cancel', 'ยกเลิก'], ['ok', 'ลบ', true]] });
+  if (!r.btn) return;
+  try { await sigStore.del(it.id); } catch (e) { toast('ลบไม่สำเร็จ: ' + e.message, 'err'); }
+  await sigLoadLibrary(true); sigRenderPanel();
+}
+async function sigMoveItem(it) {
+  try { await sigStore.put({ ...it, kind: it.kind === 'stamp' ? 'sig' : 'stamp' }, null); } catch (e) { toast('ย้ายไม่สำเร็จ: ' + e.message, 'err'); }
+  await sigLoadLibrary(true); sigRenderPanel();
+}
+async function sigEditItem(it) {
+  const url = await sigThumb(it);
+  const im = await new Promise((res) => { const i = new Image(); i.onload = () => res(i); i.src = url; });
+  const c = document.createElement('canvas'); c.width = im.naturalWidth; c.height = im.naturalHeight; c.getContext('2d').drawImage(im, 0, 0);
+  sigOpenEditor(c, it.kind, { title: 'แก้ไข' + sigKindName(it.kind), keepAlpha: true, startClean: true }, async (out) => {
+    const blob = await new Promise((r) => out.toBlob(r, 'image/png'));
+    const meta = { ...it, w: out.width, h: out.height, v: (it.v || 1) + 1 };
+    try { await sigStore.put(meta, blob); } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'err'); return; }
+    SIG.thumbs.set(meta.id + ':' + meta.v, URL.createObjectURL(blob));
+    SIG.base.set('L' + meta.id + 'v' + meta.v, out);
+    await sigLoadLibrary(true);
+    if (!$('sigPanel').classList.contains('hidden')) sigRenderPanel();
+    toast('บันทึกการแก้ไขในคลังแล้ว (ชิ้นที่วางไว้บนหน้าแล้วไม่เปลี่ยน)', 'ok', [], 3500);
+  });
+}
+
+// ---- place a library item on the page
+function sigVisibleCenter(p) {
+  const i = D.pages.indexOf(p);
+  const L = document.querySelector(`.annlayer[data-i="${i}"]`);
+  if (!L) return null;
+  const R = $('reader').getBoundingClientRect(), r = L.parentElement.getBoundingClientRect();
+  const top = Math.max(R.top, r.top), bot = Math.min(R.bottom, r.bottom);
+  const cy = bot > top ? (top + bot) / 2 : r.top + r.height / 2;
+  const cx = Math.max(r.left, Math.min(r.right, R.left + R.width / 2));
+  return { L, pt: annPoint(L, { clientX: cx, clientY: cy }) };
+}
+async function sigPlace(it) {
+  let key;
+  try { key = await sigEnsureBase(it); } catch (e) { toast(e.message, 'err'); return; }
+  const tg = SIG.target;
+  let p = tg && D.pages.includes(tg.p) ? tg.p : currentReaderPage();
+  if (!p) return;
+  const vc = sigVisibleCenter(p);
+  const pt = tg && tg.p === p ? tg.pt : vc ? vc.pt : null;
+  const L = vc ? vc.L : null;
+  const s = L ? +L.dataset.scale : 1;
+  const bw = L ? L.offsetWidth / s : 595, bh = L ? L.offsetHeight / s : 842;
+  const stamp = it.kind === 'stamp';
+  let w = stamp ? 110 : 150, h = w * it.h / it.w;
+  const maxH = stamp ? 110 : 64;
+  if (h > maxH) { h = maxH; w = h * it.w / it.h; }
+  if (w > bw * 0.7) { w = bw * 0.7; h = w * it.h / it.w; }
+  const a = { id: annId(), kind: 'img', sk: it.kind, base: key, x: 0, y: 0, w, h, r: (360 - (p.rot || 0)) % 360, color: null, weight: 0 };
+  sigPlaceCenter(a, pt || [bw / 2, bh / 2]);
+  pushUndo();
+  p.annots = [...(p.annots || []), a];
+  touchPage(p);
+  sigClosePanel();
+  selectAnn({ uid: p.uid, id: a.id });
+  refresh();
+}
+
+// ---- date & text at a point
+const TH_MON = ['ม.ค.', 'ก.พ.', 'มี.ค.', 'เม.ย.', 'พ.ค.', 'มิ.ย.', 'ก.ค.', 'ส.ค.', 'ก.ย.', 'ต.ค.', 'พ.ย.', 'ธ.ค.'];
+const TH_MONL = ['มกราคม', 'กุมภาพันธ์', 'มีนาคม', 'เมษายน', 'พฤษภาคม', 'มิถุนายน', 'กรกฎาคม', 'สิงหาคม', 'กันยายน', 'ตุลาคม', 'พฤศจิกายน', 'ธันวาคม'];
+function sigDateFormats(d = new Date()) {
+  const dd = String(d.getDate()).padStart(2, '0'), mm = String(d.getMonth() + 1).padStart(2, '0'), be = d.getFullYear() + 543;
+  return [`${d.getDate()} ${TH_MON[d.getMonth()]} ${be}`, `${d.getDate()} ${TH_MONL[d.getMonth()]} ${be}`, `${dd}/${mm}/${be}`, `${dd}/${mm}/${String(be).slice(2)}`, `${dd}/${mm}/${d.getFullYear()}`];
+}
+function sigTextAt(p, pt, text) {
+  const r = (360 - (p.rot || 0)) % 360;
+  const [ax, ay] = annLocal({ x: pt[0], y: pt[1], r }, -annDefaults.size * ANN_PAD, -annDefaults.size * ANN_LH / 2);
+  const a = newAnnAt(p, ax, ay, text);
+  a.r = r;
+  if (annTool) setAnnTool(false);
+  selectAnn({ uid: p.uid, id: a.id }, !text);
+  if (text) refresh();
+}
+function sigPointMenu(L, ev) {
+  const p = D.pages[+L.dataset.i];
+  const pt = annPoint(L, ev);
+  return [
+    { label: 'วางลายเซ็นตรงนี้', icon: 'sign', action: () => sigOpenPanel('sig', { p, pt }) },
+    { label: 'วางตราประทับตรงนี้', icon: 'stamp', action: () => sigOpenPanel('stamp', { p, pt }) },
+    { label: 'ใส่วันที่ตรงนี้', icon: 'cal', sub: sigDateFormats().map((f) => ({ label: f, action: () => sigTextAt(p, pt, f) })) },
+    { label: 'เพิ่มข้อความตรงนี้', icon: 'type', action: () => sigTextAt(p, pt, '') },
+  ];
+}
+// touch: press and hold on a page -> signature / stamp / date / text menu
+(() => {
+  let timer = 0, st = null;
+  const cancel = () => { if (st) { st = null; clearTimeout(timer); } };
+  $('readerPages').addEventListener('pointerdown', (e) => {
+    if (e.pointerType !== 'touch' || mode !== 'read' || annTool) return;
+    const L = e.target.closest('.annlayer');
+    if (!L || e.target.closest('.annot')) return;
+    st = { x: e.clientX, y: e.clientY, L };
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      if (!st) return;
+      const s0 = st; st = null;
+      if (ctxEl && Date.now() - (window.__menuAt || 0) < 800) return; // the browser already opened our menu (contextmenu)
+      try { navigator.vibrate && navigator.vibrate(12); } catch {}
+      showMenu(sigPointMenu(s0.L, { clientX: s0.x, clientY: s0.y }), s0.x, s0.y);
+    }, 520);
+  });
+  window.addEventListener('pointermove', (e) => { if (st && Math.hypot(e.clientX - st.x, e.clientY - st.y) > 10) cancel(); }, true);
+  window.addEventListener('pointerup', cancel, true);
+  window.addEventListener('pointercancel', cancel, true);
+  $('reader').addEventListener('scroll', cancel, { passive: true });
+  $('reader').addEventListener('touchstart', (e) => { if (e.touches.length > 1) cancel(); }, { passive: true });
+})();
+
+// library tiles: tap = place, right-click / long-press = menu
+(() => {
+  const list = $('sigList');
+  let timer = 0, st = null, fired = false;
+  list.addEventListener('pointerdown', (e) => {
+    const b = e.target.closest('.sigitem'); if (!b) return;
+    fired = false; st = { x: e.clientX, y: e.clientY, b };
+    if (e.pointerType === 'touch') timer = setTimeout(() => { if (!st) return; fired = true; const it = SIG.items.find((x) => x.id === st.b.dataset.id); try { navigator.vibrate && navigator.vibrate(12); } catch {} if (it) sigItemMenu(it, st.x, st.y - 10); st = null; }, 520);
+  });
+  list.addEventListener('pointermove', (e) => { if (st && Math.hypot(e.clientX - st.x, e.clientY - st.y) > 10) { st = null; clearTimeout(timer); } });
+  list.addEventListener('pointerup', () => { clearTimeout(timer); st = null; });
+  list.addEventListener('click', (e) => {
+    const b = e.target.closest('.sigitem'); if (!b) return;
+    if (fired) { fired = false; return; }
+    const it = SIG.items.find((x) => x.id === b.dataset.id); if (it) sigPlace(it);
+  });
+  list.addEventListener('contextmenu', (e) => {
+    const b = e.target.closest('.sigitem'); if (!b) return;
+    e.preventDefault(); e.stopPropagation();
+    if (fired) return;
+    const it = SIG.items.find((x) => x.id === b.dataset.id); if (it) sigItemMenu(it, e.clientX, e.clientY);
+  });
+})();
+
+// ---- export / import the whole library (one file)
+async function sigExport() {
+  const items = await sigLoadLibrary(true);
+  if (!items.length) { toast('คลังยังว่างอยู่'); return; }
+  busy('กำลังเตรียมไฟล์คลัง …');
+  try {
+    const out = [];
+    for (const it of items) {
+      const b = await sigStore.png(it.id); if (!b) continue;
+      const u8 = new Uint8Array(await b.arrayBuffer());
+      let bin = ''; for (let i = 0; i < u8.length; i += 0x8000) bin += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000));
+      out.push({ ...it, png: btoa(bin) });
+    }
+    const json = JSON.stringify({ app: 'Super PDF', type: 'signature-library', format: 1, exported: new Date().toISOString(), items: out });
+    unbusy();
+    const d = new Date(), stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    await saveBytes(new TextEncoder().encode(json), `คลังลายเซ็น SuperPDF ${stamp}.json`, 'json');
+  } catch (e) { unbusy(); toast('ส่งออกไม่สำเร็จ: ' + e.message, 'err'); }
+}
+async function sigImportFile(f) {
+  let data;
+  try { data = JSON.parse(await f.text()); } catch { toast('ไฟล์นี้ไม่ใช่ไฟล์คลังลายเซ็นของ Super PDF', 'err'); return; }
+  const items = (data && data.type === 'signature-library' && Array.isArray(data.items)) ? data.items.filter((x) => x && x.id && x.png) : null;
+  if (!items || !items.length) { toast('ไม่พบรายการในไฟล์นี้', 'err'); return; }
+  const cur = await sigLoadLibrary(true);
+  const r = await dialog({
+    title: 'นำเข้าคลังลายเซ็น',
+    body: `<p>พบ ${items.length} รายการ (ลายเซ็น ${items.filter((x) => x.kind !== 'stamp').length} · ตราประทับ ${items.filter((x) => x.kind === 'stamp').length})</p>` +
+      (cur.length ? `<label class="radio"><input type="radio" name="m" value="merge" checked> รวมกับคลังเดิม (${cur.length} รายการ)</label><label class="radio"><input type="radio" name="m" value="replace"> แทนที่คลังเดิมทั้งหมด</label>` : ''),
+    buttons: [['cancel', 'ยกเลิก'], ['ok', 'นำเข้า', true]],
+  });
+  if (!r.btn) return;
+  busy('กำลังนำเข้า …');
+  try {
+    if (r.values.m === 'replace') for (const it of cur) await sigStore.del(it.id);
+    for (const it of items) {
+      const bin = atob(it.png), u8 = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) u8[i] = bin.charCodeAt(i);
+      const id = /^[A-Za-z0-9_-]{1,40}$/.test(it.id) ? it.id : sigNewId();
+      await sigStore.put({ id, kind: it.kind, w: it.w, h: it.h, t: it.t, v: (it.v || 1) }, new Blob([u8], { type: 'image/png' }));
+    }
+    SIG.thumbs.forEach((u) => u && URL.revokeObjectURL(u)); SIG.thumbs.clear();
+    await sigLoadLibrary(true);
+    unbusy();
+    toast(`นำเข้าแล้ว ${items.length} รายการ`, 'ok', [], 3000);
+    if (!$('sigPanel').classList.contains('hidden')) sigRenderPanel();
+  } catch (e) { unbusy(); toast('นำเข้าไม่สำเร็จ: ' + e.message, 'err'); }
+}
+function sigLibMenu(x, y) {
+  showMenu([
+    { head: 'ที่เก็บ: ' + sigStore.where() },
+    { label: 'ส่งออกคลังเป็นไฟล์ (สำรอง / ย้ายเครื่อง)…', icon: 'save', action: sigExport },
+    { label: 'นำเข้าคลังจากไฟล์…', icon: 'open', action: () => $('sigImportFile').click() },
+  ], x, y);
+}
+
+// ---- pick a picture (scan = camera on phones)
+function sigPickImage(kind, camera) {
+  const inp = $(camera && IS_TOUCH ? 'sigCam' : 'sigPick');
+  inp.dataset.kind = kind;
+  inp.click();
+}
+for (const id of ['sigCam', 'sigPick']) $(id).onchange = async (e) => {
+  const f = e.target.files[0]; const kind = e.target.dataset.kind || 'sig'; e.target.value = '';
+  if (!f) return;
+  busy('กำลังเปิดรูป …');
+  let c;
+  try { c = await photoToCanvas(f, 2600); } catch (err) { unbusy(); toast('เปิดรูปไม่ได้: ' + err.message, 'err'); return; }
+  unbusy();
+  sigOpenEditor(c, kind, { title: 'เพิ่ม' + sigKindName(kind) }, async (out) => {
+    const it = await sigAddToLibrary(out, kind);
+    sigAfterCreate(it);
+  });
+};
+$('sigImportFile').onchange = (e) => { const f = e.target.files[0]; e.target.value = ''; if (f) sigImportFile(f); };
+function sigAfterCreate(it) { // new item goes to the library and straight onto the page (like CamScanner)
+  if (mode === 'read' && D.pages.length) sigPlace(it);
+  else toast(`บันทึก${sigKindName(it.kind)}ลงคลังแล้ว`, 'ok', [], 2500);
+}
+
+// ------------------------------------------------------------------ draw a signature (วาด)
+const SD = { strokes: [], redo: [], cur: null, color: '#111111', width: 3.2, kind: 'sig', rot: false };
+function sigOpenDraw(kind) {
+  SD.kind = kind; SD.strokes = []; SD.redo = []; SD.cur = null;
+  $('sigDrawTitle').textContent = 'สร้าง' + sigKindName(kind);
+  $('sigDraw').classList.remove('hidden');
+  sigDrawLayout();
+  sigDrawPaint();
+}
+function sigDrawClose() { $('sigDraw').classList.add('hidden'); }
+function sigDrawLayout() {
+  const box = $('sigDrawBox');
+  // phones held upright: turn the pad sideways (landscape) so there is room to sign — like CamScanner
+  SD.rot = IS_TOUCH && innerHeight > innerWidth && innerWidth < 760;
+  box.classList.toggle('rot', SD.rot);
+  if (SD.rot) { box.style.width = innerHeight + 'px'; box.style.height = innerWidth + 'px'; }
+  else { box.style.width = ''; box.style.height = ''; }
+  const cv = $('sigPad'), dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  SD.dpr = dpr;
+}
+function sigPadPoint(e) { // pointer -> pad css px (handles the rotated layout)
+  const cv = $('sigPad'), r = cv.getBoundingClientRect();
+  if (!SD.rot) return [e.clientX - r.left, e.clientY - r.top];
+  return [(e.clientY - r.top) * cv.clientWidth / r.height, (r.right - e.clientX) * cv.clientHeight / r.width];
+}
+function sigStrokePath(g, st) {
+  const P = st.pts;
+  g.strokeStyle = st.color; g.fillStyle = st.color; g.lineCap = 'round'; g.lineJoin = 'round';
+  if (P.length === 1) { g.beginPath(); g.arc(P[0][0], P[0][1], P[0][2] / 2, 0, Math.PI * 2); g.fill(); return; }
+  for (let i = 1; i < P.length; i++) {
+    const a = P[i - 1], b = P[i], pa = P[i - 2] || a;
+    const m0 = [(pa[0] + a[0]) / 2, (pa[1] + a[1]) / 2], m1 = [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
+    g.lineWidth = (a[2] + b[2]) / 2;
+    g.beginPath(); g.moveTo(i === 1 ? a[0] : m0[0], i === 1 ? a[1] : m0[1]); g.quadraticCurveTo(a[0], a[1], m1[0], m1[1]);
+    if (i === P.length - 1) g.lineTo(b[0], b[1]);
+    g.stroke();
+  }
+}
+function sigDrawPaint() {
+  const cv = $('sigPad'), g = cv.getContext('2d');
+  g.setTransform(1, 0, 0, 1, 0, 0); g.clearRect(0, 0, cv.width, cv.height);
+  g.setTransform(SD.dpr, 0, 0, SD.dpr, 0, 0);
+  for (const st of SD.strokes) sigStrokePath(g, st);
+  if (SD.cur) sigStrokePath(g, SD.cur);
+  const has = SD.strokes.length > 0;
+  $('sigPadPh').classList.toggle('hidden', has || !!SD.cur);
+  $('sigDrawOk').disabled = !has;
+  $('sigDrawUndo').disabled = !has; $('sigDrawRedo').disabled = !SD.redo.length; $('sigDrawClear').disabled = !has;
+}
+(() => {
+  const cv = $('sigPad');
+  cv.addEventListener('pointerdown', (e) => {
+    if (SD.cur) return;
+    e.preventDefault();
+    try { cv.setPointerCapture(e.pointerId); } catch {}
+    const [x, y] = sigPadPoint(e);
+    const w = SD.width * (e.pointerType === 'pen' && e.pressure ? 0.6 + e.pressure * 0.8 : 1);
+    SD.cur = { color: SD.color, pts: [[x, y, w]], id: e.pointerId, t: performance.now(), lw: w };
+    sigDrawPaint();
+  });
+  cv.addEventListener('pointermove', (e) => {
+    const st = SD.cur; if (!st || e.pointerId !== st.id) return;
+    e.preventDefault();
+    const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];
+    for (const ev of evs.length ? evs : [e]) {
+      const [x, y] = sigPadPoint(ev);
+      const last = st.pts[st.pts.length - 1];
+      const dist = Math.hypot(x - last[0], y - last[1]); if (dist < 0.8) continue;
+      const now = performance.now(), v = dist / Math.max(1, now - st.t); st.t = now;
+      let w = SD.width * Math.max(0.55, Math.min(1.25, 1.3 - v * 0.35));
+      if (ev.pointerType === 'pen' && ev.pressure) w = SD.width * (0.5 + ev.pressure * 0.9);
+      w = st.lw * 0.6 + w * 0.4; st.lw = w;
+      st.pts.push([x, y, w]);
+    }
+    sigDrawPaint();
+  });
+  const end = (e) => {
+    const st = SD.cur; if (!st || e.pointerId !== st.id) return;
+    SD.cur = null; SD.strokes.push(st); SD.redo = []; sigDrawPaint();
+  };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  $('sigDrawCancel').onclick = sigDrawClose;
+  $('sigDrawUndo').onclick = () => { if (SD.strokes.length) { SD.redo.push(SD.strokes.pop()); sigDrawPaint(); } };
+  $('sigDrawRedo').onclick = () => { if (SD.redo.length) { SD.strokes.push(SD.redo.pop()); sigDrawPaint(); } };
+  $('sigDrawClear').onclick = () => { if (SD.strokes.length) { SD.redo = []; SD.strokes = []; sigDrawPaint(); } };
+  $('sigDrawPens').querySelectorAll('button').forEach((b) => b.onclick = () => {
+    if (b.dataset.w) { SD.width = +b.dataset.w; $('sigDrawPens').querySelectorAll('[data-w]').forEach((x) => x.classList.toggle('on', x === b)); }
+    if (b.dataset.c) { SD.color = b.dataset.c; $('sigDrawPens').querySelectorAll('[data-c]').forEach((x) => x.classList.toggle('on', x === b)); }
+  });
+  $('sigDrawOk').onclick = async () => {
+    const out = sigDrawExport(); if (!out) return;
+    sigDrawClose();
+    const it = await sigAddToLibrary(out, SD.kind);
+    sigAfterCreate(it);
+  };
+  window.addEventListener('resize', () => { if (!$('sigDraw').classList.contains('hidden')) { sigDrawLayout(); sigDrawPaint(); } });
+})();
+function sigDrawExport() {
+  if (!SD.strokes.length) return null;
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const st of SD.strokes) for (const [x, y, w] of st.pts) { x0 = Math.min(x0, x - w); y0 = Math.min(y0, y - w); x1 = Math.max(x1, x + w); y1 = Math.max(y1, y + w); }
+  const pd = 6; x0 -= pd; y0 -= pd; x1 += pd; y1 += pd;
+  const bw = x1 - x0, bh = y1 - y0;
+  const k = Math.min(4, 1400 / bw, 900 / bh);
+  const c = document.createElement('canvas'); c.width = Math.max(1, Math.round(bw * k)); c.height = Math.max(1, Math.round(bh * k));
+  const g = c.getContext('2d'); g.setTransform(k, 0, 0, k, -x0 * k, -y0 * k);
+  for (const st of SD.strokes) sigStrokePath(g, st);
+  return c;
+}
+
+// ------------------------------------------------------------------ crop + clean-up editor (ตัดกรอบ / ลบส่วนเกิน)
+// step 1: crop rectangle on the photo (rotate 90°); step 2: the paper is removed (soft alpha from ink darkness) and the
+// user erases leftovers: brush eraser, tap = remove a whole piece, drag a box = remove everything inside, auto despeckle.
+const SE = {
+  open: false, src: null, kind: 'sig', onDone: null, keepAlpha: false,
+  step: 'crop', crop: null, cropUsed: null,
+  W: 0, H: 0, rgb: null, alpha: null, col: null, er: null, undo: [], redo: [],
+  tool: 'erase', size: 28, group: 6, thr: 50,
+  view: { z: 1, tx: 0, ty: 0 }, ctx: null, img: null,
+};
+function sigOpenEditor(src, kind, opts, onDone) {
+  Object.assign(SE, { open: true, src, kind, onDone, keepAlpha: !!opts.keepAlpha || sigHasAlpha(src), step: 'crop', er: null, undo: [], redo: [], cropUsed: null });
+  SE.crop = SE.keepAlpha ? sigAlphaBox(src) : sigAutoCrop(src);
+  $('sigEdTitle').textContent = opts.title || 'เพิ่ม' + sigKindName(kind);
+  $('sigEdThrWrap').classList.toggle('hidden', SE.keepAlpha);
+  $('sigEd').classList.remove('hidden');
+  sigEdStep(opts.startClean ? 'clean' : 'crop');
+}
+function sigCloseEditor() { SE.open = false; $('sigEd').classList.add('hidden'); SE.src = SE.rgb = SE.alpha = SE.col = SE.er = null; SE.undo = []; SE.redo = []; }
+function sigHasAlpha(c) {
+  const g = c.getContext('2d'), d = g.getImageData(0, 0, c.width, c.height).data;
+  let t = 0, n = 0;
+  for (let i = 3; i < d.length; i += 4 * 7) { n++; if (d[i] < 200) t++; }
+  return t / n > 0.03;
+}
+function sigAlphaBox(c) {
+  const d = c.getContext('2d').getImageData(0, 0, c.width, c.height).data, W = c.width, H = c.height;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[(y * W + x) * 4 + 3] > 8) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  if (x1 < 0) return { x: 0, y: 0, w: W, h: H };
+  const p = Math.round(Math.max(W, H) * 0.02);
+  x0 = Math.max(0, x0 - p); y0 = Math.max(0, y0 - p); x1 = Math.min(W, x1 + p + 1); y1 = Math.min(H, y1 + p + 1);
+  return { x: x0, y: y0, w: x1 - x0, h: y1 - y0 };
+}
+// ink box on a small copy: paper removed, 1st..99th percentile of ink positions, + margin
+function sigAutoCrop(src) {
+  const k = Math.min(1, 700 / Math.max(src.width, src.height));
+  const W = Math.max(1, Math.round(src.width * k)), H = Math.max(1, Math.round(src.height * k));
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.drawImage(src, 0, 0, W, H);
+  const d = g.getImageData(0, 0, W, H).data, N = W * H, lum = new Uint8Array(N);
+  for (let i = 0, j = 0; i < N; i++, j += 4) lum[i] = Math.min(d[j], d[j + 1], d[j + 2]);
+  const bg = backgroundMap(lum, W, H, 6);
+  const xs = [], ys = [];
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (1 - lum[i] / bg[i] > 0.3) { xs.push(x); ys.push(y); } }
+  const full = { x: 0, y: 0, w: src.width, h: src.height };
+  if (xs.length < 20) return full;
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+  const q = (A, f) => A[Math.min(A.length - 1, Math.max(0, Math.round(f * (A.length - 1))))];
+  let x0 = q(xs, 0.01), x1 = q(xs, 0.99), y0 = q(ys, 0.01), y1 = q(ys, 0.99);
+  const mx = (x1 - x0) * 0.08 + 6, my = (y1 - y0) * 0.15 + 6;
+  x0 = Math.max(0, x0 - mx); y0 = Math.max(0, y0 - my); x1 = Math.min(W, x1 + mx); y1 = Math.min(H, y1 + my);
+  if ((x1 - x0) * (y1 - y0) > 0.9 * W * H) return full;
+  return { x: Math.round(x0 / k), y: Math.round(y0 / k), w: Math.round((x1 - x0) / k), h: Math.round((y1 - y0) / k) };
+}
+
+// ---- steps
+function sigEdStep(step) {
+  if (step === 'clean' && SE.crop.w < 4) return;
+  SE.step = step;
+  $('sigEd').dataset.step = step;
+  $('sigEd').querySelectorAll('.sigsteps button').forEach((b) => b.classList.toggle('on', b.dataset.s === step));
+  $('sigEdCropBar').classList.toggle('hidden', step !== 'crop');
+  $('sigEdCleanBar').classList.toggle('hidden', step !== 'clean');
+  $('sigEdUndo').classList.toggle('hidden', step !== 'clean'); $('sigEdRedo').classList.toggle('hidden', step !== 'clean');
+  $('sigEdOkLbl').textContent = step === 'crop' ? 'ถัดไป' : 'เสร็จแล้ว';
+  $('sigCropBox').classList.toggle('hidden', step !== 'crop');
+  $('sigEdCanvas').classList.toggle('checker', step === 'clean');
+  if (step === 'crop') {
+    $('sigEdStep').textContent = 'ขั้นที่ 1/2 · ลากมุมหรือขอบของกรอบให้คลุมเฉพาะ' + sigKindName(SE.kind);
+    const cv = $('sigEdCanvas'); cv.width = SE.src.width; cv.height = SE.src.height;
+    cv.getContext('2d').drawImage(SE.src, 0, 0);
+    sigEdFit(); sigCropDraw();
+  } else {
+    $('sigEdStep').textContent = 'ขั้นที่ 2/2 · ลบสิ่งที่ไม่ใช่' + sigKindName(SE.kind) + (IS_TOUCH ? '' : ' (ลายตารางหมากรุก = ส่วนที่โปร่งใส)');
+    const key = JSON.stringify(SE.crop);
+    if (SE.cropUsed !== key) { SE.cropUsed = key; sigEdBuild(); }
+    const cv = $('sigEdCanvas'); cv.width = SE.W; cv.height = SE.H;
+    SE.ctx = cv.getContext('2d'); SE.img = SE.ctx.createImageData(SE.W, SE.H);
+    sigEdRender();
+    sigEdFit(); sigEdTool(SE.tool);
+  }
+  sigEdUndoBtns();
+}
+function sigEdBuild() { // crop -> working image -> extract ink
+  const maxS = IS_TOUCH ? 1100 : 1500;
+  const k = Math.min(1, maxS / Math.max(SE.crop.w, SE.crop.h));
+  const W = Math.max(1, Math.round(SE.crop.w * k)), H = Math.max(1, Math.round(SE.crop.h * k));
+  const c = document.createElement('canvas'); c.width = W; c.height = H;
+  const g = c.getContext('2d'); g.imageSmoothingQuality = 'high';
+  g.drawImage(SE.src, SE.crop.x, SE.crop.y, SE.crop.w, SE.crop.h, 0, 0, W, H);
+  SE.W = W; SE.H = H; SE.rgb = g.getImageData(0, 0, W, H).data;
+  SE.er = new Uint8Array(W * H); SE.undo = []; SE.redo = [];
+  SE.size = Math.round(Math.max(12, Math.min(60, Math.min(W, H) / 10)));
+  sigEdExtract();
+}
+function sigEdExtract() {
+  const W = SE.W, H = SE.H, N = W * H, d = SE.rgb;
+  SE.alpha = new Float32Array(N); SE.col = new Uint8ClampedArray(N * 3);
+  if (SE.keepAlpha) {
+    for (let i = 0; i < N; i++) { SE.alpha[i] = d[i * 4 + 3] / 255; SE.col[i * 3] = d[i * 4]; SE.col[i * 3 + 1] = d[i * 4 + 1]; SE.col[i * 3 + 2] = d[i * 4 + 2]; }
+    return;
+  }
+  const B = Math.max(6, Math.round(Math.min(W, H) / 70));
+  const bg = [0, 1, 2].map((k) => { const ch = new Uint8Array(N); for (let i = 0, j = k; i < N; i++, j += 4) ch[i] = d[j]; return backgroundMap(ch, W, H, B); });
+  const t0 = 0.05 + (100 - SE.thr) / 100 * 0.26, t1 = t0 + 0.30;
+  for (let i = 0, j = 0; i < N; i++, j += 4) {
+    const nr = Math.min(1, d[j] / bg[0][i]), ng = Math.min(1, d[j + 1] / bg[1][i]), nb = Math.min(1, d[j + 2] / bg[2][i]);
+    const ink = 1 - Math.min(nr, ng, nb);
+    let a = (ink - t0) / (t1 - t0); a = a <= 0 ? 0 : a >= 1 ? 1 : a * a * (3 - 2 * a);
+    SE.alpha[i] = a;
+    if (a > 0.01) { // un-mix the ink colour from the white paper
+      const q = 1 - a;
+      SE.col[i * 3] = Math.max(0, Math.min(1, (nr - q) / a)) * 255;
+      SE.col[i * 3 + 1] = Math.max(0, Math.min(1, (ng - q) / a)) * 255;
+      SE.col[i * 3 + 2] = Math.max(0, Math.min(1, (nb - q) / a)) * 255;
+    }
+  }
+}
+function sigEdRender(x0 = 0, y0 = 0, x1 = SE.W, y1 = SE.H) {
+  x0 = Math.max(0, x0 | 0); y0 = Math.max(0, y0 | 0); x1 = Math.min(SE.W, Math.ceil(x1)); y1 = Math.min(SE.H, Math.ceil(y1));
+  if (x1 <= x0 || y1 <= y0) return;
+  const o = SE.img.data, W = SE.W;
+  for (let y = y0; y < y1; y++) for (let x = x0; x < x1; x++) {
+    const i = y * W + x, j = i * 4;
+    o[j] = SE.col[i * 3]; o[j + 1] = SE.col[i * 3 + 1]; o[j + 2] = SE.col[i * 3 + 2];
+    o[j + 3] = SE.alpha[i] * (255 - SE.er[i]);
+  }
+  SE.ctx.putImageData(SE.img, 0, 0, x0, y0, x1 - x0, y1 - y0);
+}
+function sigEdResult() {
+  const W = SE.W, H = SE.H;
+  let x0 = W, y0 = H, x1 = -1, y1 = -1;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) { const i = y * W + x; if (SE.alpha[i] * (255 - SE.er[i]) > 10) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; } }
+  if (x1 < 0) return null;
+  const p = Math.round(Math.max(4, Math.max(x1 - x0, y1 - y0) * 0.02));
+  x0 = Math.max(0, x0 - p); y0 = Math.max(0, y0 - p); x1 = Math.min(W - 1, x1 + p); y1 = Math.min(H - 1, y1 + p);
+  const w = x1 - x0 + 1, h = y1 - y0 + 1;
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'), im = g.createImageData(w, h), o = im.data;
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+    const i = (y + y0) * W + x + x0, j = (y * w + x) * 4;
+    const a = SE.alpha[i] * (255 - SE.er[i]);
+    if (a < 3) continue;
+    o[j] = SE.col[i * 3]; o[j + 1] = SE.col[i * 3 + 1]; o[j + 2] = SE.col[i * 3 + 2]; o[j + 3] = a;
+  }
+  g.putImageData(im, 0, 0);
+  const k = Math.min(1, 1200 / Math.max(w, h));
+  if (k >= 1) return c;
+  const c2 = document.createElement('canvas'); c2.width = Math.round(w * k); c2.height = Math.round(h * k);
+  const g2 = c2.getContext('2d'); g2.imageSmoothingQuality = 'high'; g2.drawImage(c, 0, 0, c2.width, c2.height);
+  return c2;
+}
+
+// ---- view (fit / zoom / pan)
+function sigEdFit() {
+  const st = $('sigEdStage'), cv = $('sigEdCanvas');
+  const pad = SE.step === 'crop' ? 28 : 16;
+  const z = Math.min((st.clientWidth - pad * 2) / cv.width, (st.clientHeight - pad * 2) / cv.height, SE.step === 'crop' ? 4 : 8);
+  SE.view = { z, tx: (st.clientWidth - cv.width * z) / 2, ty: (st.clientHeight - cv.height * z) / 2 };
+  sigEdApplyView();
+}
+function sigEdApplyView() {
+  const v = SE.view, cv = $('sigEdCanvas');
+  cv.style.width = cv.width * v.z + 'px'; cv.style.height = cv.height * v.z + 'px';
+  $('sigEdWrap').style.transform = `translate(${v.tx}px,${v.ty}px)`;
+  $('sigEdZoomLbl').textContent = Math.round(v.z * 100) + '%';
+  if (SE.step === 'crop') sigCropDraw();
+}
+function sigEdZoomAt(z, cx, cy) {
+  const v = SE.view, st = $('sigEdStage').getBoundingClientRect();
+  if (cx == null) { cx = st.left + st.width / 2; cy = st.top + st.height / 2; }
+  z = Math.max(0.05, Math.min(16, z));
+  const px = (cx - st.left - v.tx) / v.z, py = (cy - st.top - v.ty) / v.z;
+  SE.view = { z, tx: cx - st.left - px * z, ty: cy - st.top - py * z };
+  sigEdApplyView();
+}
+const sigEdImgPt = (e) => { const st = $('sigEdStage').getBoundingClientRect(), v = SE.view; return [(e.clientX - st.left - v.tx) / v.z, (e.clientY - st.top - v.ty) / v.z]; };
+
+// ---- crop box
+function sigCropDraw() {
+  const b = $('sigCropBox'), v = SE.view, c = SE.crop;
+  Object.assign(b.style, { left: v.tx + c.x * v.z + 'px', top: v.ty + c.y * v.z + 'px', width: c.w * v.z + 'px', height: c.h * v.z + 'px' });
+}
+function sigCropRotate() {
+  const s = SE.src, c = SE.crop;
+  SE.src = rotateCanvas(s, -90);
+  SE.crop = { x: c.y, y: s.width - c.x - c.w, w: c.h, h: c.w };
+  SE.cropUsed = null;
+  sigEdStep('crop');
+}
+
+// ---- undo inside the editor (erase mask snapshots)
+function sigEdPush() { SE.undo.push(SE.er.slice()); if (SE.undo.length > (IS_TOUCH ? 12 : 25)) SE.undo.shift(); SE.redo = []; sigEdUndoBtns(); }
+function sigEdUndoBtns() { $('sigEdUndo').disabled = !SE.undo.length; $('sigEdRedo').disabled = !SE.redo.length; }
+function sigEdUndo() { if (!SE.undo.length) return; SE.redo.push(SE.er); SE.er = SE.undo.pop(); sigEdRender(); sigEdUndoBtns(); }
+function sigEdRedo() { if (!SE.redo.length) return; SE.undo.push(SE.er); SE.er = SE.redo.pop(); sigEdRender(); sigEdUndoBtns(); }
+
+// ---- tools
+function sigEdTool(t) {
+  SE.tool = t;
+  $('sigEdCleanBar').querySelectorAll('[data-t]').forEach((b) => b.classList.toggle('active', b.dataset.t === t));
+  $('sigEdSizeLbl').textContent = t === 'erase' ? 'ขนาดยางลบ' : 'จับกลุ่ม';
+  const inp = $('sigEdSize');
+  if (t === 'erase') { inp.min = 4; inp.max = 140; inp.value = SE.size; }
+  else { inp.min = 0; inp.max = 40; inp.value = SE.group; }
+  $('sigEdStage').dataset.tool = t;
+  $('sigEdHint').textContent = t === 'erase' ? 'ระบายทับส่วนที่ไม่ต้องการ · สองนิ้วหรือ Ctrl+ล้อเมาส์ = ซูม'
+    : 'แตะที่ตัวอักษร/เส้นที่ไม่ต้องการเพื่อลบทั้งชิ้น · ลากเป็นกรอบเพื่อลบทุกอย่างในกรอบ';
+}
+function sigEdStamp(x, y, r) {
+  const W = SE.W, H = SE.H, er = SE.er;
+  const x0 = Math.max(0, Math.floor(x - r - 1)), x1 = Math.min(W - 1, Math.ceil(x + r + 1));
+  const y0 = Math.max(0, Math.floor(y - r - 1)), y1 = Math.min(H - 1, Math.ceil(y + r + 1));
+  for (let yy = y0; yy <= y1; yy++) for (let xx = x0; xx <= x1; xx++) {
+    const dd = Math.hypot(xx - x, yy - y);
+    if (dd <= r + 0.5) { const v = dd <= r - 0.5 ? 255 : Math.round((r + 0.5 - dd) * 255); const i = yy * W + xx; if (v > er[i]) er[i] = v; }
+  }
+}
+function sigEdEraseSeg(a, b, r) {
+  const L = Math.hypot(b[0] - a[0], b[1] - a[1]), n = Math.max(1, Math.ceil(L / Math.max(1, r / 3)));
+  for (let k = 0; k <= n; k++) sigEdStamp(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n, r);
+  sigEdRender(Math.min(a[0], b[0]) - r - 2, Math.min(a[1], b[1]) - r - 2, Math.max(a[0], b[0]) + r + 2, Math.max(a[1], b[1]) + r + 2);
+}
+const sigInk = (i) => SE.alpha[i] * (255 - SE.er[i]) > 50;
+// tap: remove the piece of ink under the finger (pieces closer than "group" px count as one)
+function sigEdPick(x, y) {
+  const W = SE.W, H = SE.H, N = W * H, g = Math.round(SE.group * Math.max(1, Math.min(W, H) / 400));
+  let ink = new Float32Array(N);
+  for (let i = 0; i < N; i++) ink[i] = sigInk(i) ? 1 : 0;
+  const dil = g ? sigMorph(ink, W, H, g, true) : ink;
+  // nearest ink near the tap
+  const R = Math.round(Math.max(8, Math.min(W, H) * 0.04));
+  let best = -1, bd = 1e9;
+  for (let yy = Math.max(0, Math.round(y) - R); yy <= Math.min(H - 1, Math.round(y) + R); yy++)
+    for (let xx = Math.max(0, Math.round(x) - R); xx <= Math.min(W - 1, Math.round(x) + R); xx++) {
+      const i = yy * W + xx; if (!dil[i]) continue;
+      const dd = (xx - x) ** 2 + (yy - y) ** 2; if (dd < bd) { bd = dd; best = i; }
+    }
+  if (best < 0) { toast('ตรงนี้ไม่มีหมึก — แตะให้ตรงตัวอักษรหรือเส้นที่ต้องการลบ', '', [], 2200); return; }
+  const seen = new Uint8Array(N), stack = [best]; seen[best] = 1;
+  let bx0 = W, by0 = H, bx1 = 0, by1 = 0, cnt = 0;
+  while (stack.length) {
+    const i = stack.pop(), px = i % W, py = (i / W) | 0;
+    cnt++;
+    if (px < bx0) bx0 = px; if (px > bx1) bx1 = px; if (py < by0) by0 = py; if (py > by1) by1 = py;
+    for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+      const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+      const q = qy * W + qx; if (!seen[q] && dil[q]) { seen[q] = 1; stack.push(q); }
+    }
+  }
+  sigEdPush();
+  // erase everything visible inside the piece (soft edges of the strokes included)
+  const er = SE.er, gx = g + 2;
+  for (let yy = Math.max(0, by0 - gx); yy <= Math.min(H - 1, by1 + gx); yy++) for (let xx = Math.max(0, bx0 - gx); xx <= Math.min(W - 1, bx1 + gx); xx++) {
+    const i = yy * W + xx;
+    if (seen[i]) { er[i] = 255; continue; }
+    // halo pixels next to the piece
+    if (SE.alpha[i] > 0) for (let dy = -2; dy <= 2 && er[i] < 255; dy++) for (let dx = -2; dx <= 2; dx++) {
+      const qx = xx + dx, qy = yy + dy; if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+      if (seen[qy * W + qx]) { er[i] = 255; break; }
+    }
+  }
+  sigEdRender(bx0 - gx, by0 - gx, bx1 + gx + 1, by1 + gx + 1);
+  ink = null;
+}
+function sigEdEraseRect(x0, y0, x1, y1) {
+  [x0, x1] = [Math.max(0, Math.min(x0, x1)) | 0, Math.min(SE.W, Math.ceil(Math.max(x0, x1)))];
+  [y0, y1] = [Math.max(0, Math.min(y0, y1)) | 0, Math.min(SE.H, Math.ceil(Math.max(y0, y1)))];
+  if (x1 - x0 < 2 || y1 - y0 < 2) return;
+  sigEdPush();
+  for (let y = y0; y < y1; y++) SE.er.fill(255, y * SE.W + x0, y * SE.W + x1);
+  sigEdRender(x0, y0, x1, y1);
+}
+// remove isolated small specks (dust, paper texture); dots that belong to the signature are near other ink and stay
+function sigEdDespeckle() {
+  const W = SE.W, H = SE.H, N = W * H;
+  const ink = new Uint8Array(N); for (let i = 0; i < N; i++) ink[i] = SE.alpha[i] * (255 - SE.er[i]) > 60 ? 1 : 0;
+  const I = new Uint32Array((W + 1) * (H + 1));
+  for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) { s += ink[y * W + x]; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + s; } }
+  const sum = (x0, y0, x1, y1) => I[y1 * (W + 1) + x1] - I[y0 * (W + 1) + x1] - I[y1 * (W + 1) + x0] + I[y0 * (W + 1) + x0];
+  // small pieces are specks unless a big piece of writing is near them (a dot of the signature, a Thai tone mark …)
+  const minA = Math.max(6, (Math.min(W, H) / 70) ** 2), M = Math.round(Math.max(6, Math.min(W, H) * 0.06));
+  const lab = new Int32Array(N); let nl = 0, removed = 0;
+  const comps = [];
+  for (let s = 0; s < N; s++) {
+    if (!ink[s] || lab[s]) continue;
+    nl++; const st = [s]; let cnt = 0; lab[s] = nl;
+    let x0 = W, y0 = H, x1 = 0, y1 = 0;
+    while (st.length) {
+      const i = st.pop(), px = i % W, py = (i / W) | 0; cnt++;
+      if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= W || qy >= H) continue;
+        const q = qy * W + qx; if (ink[q] && !lab[q]) { lab[q] = nl; st.push(q); }
+      }
+    }
+    comps.push({ l: nl, n: cnt, box: [x0, y0, x1, y1] });
+  }
+  const big = new Uint8Array(nl + 1);
+  for (const c of comps) if (c.n > minA) big[c.l] = 1;
+  I.fill(0);
+  for (let y = 0; y < H; y++) { let s = 0; for (let x = 0; x < W; x++) { const l = lab[y * W + x]; s += l && big[l] ? 1 : 0; I[(y + 1) * (W + 1) + x + 1] = I[y * (W + 1) + x + 1] + s; } }
+  const kill = [];
+  for (const c of comps) {
+    if (big[c.l]) continue;
+    const [x0, y0, x1, y1] = c.box;
+    if (sum(Math.max(0, x0 - M), Math.max(0, y0 - M), Math.min(W, x1 + M + 1), Math.min(H, y1 + M + 1)) > 0) continue;
+    kill.push(c.box);
+  }
+  if (!kill.length) { toast('ไม่พบจุดสกปรกที่แยกอยู่โดด ๆ', '', [], 2200); return; }
+  sigEdPush();
+  for (const [x0, y0, x1, y1] of kill) {
+    for (let y = Math.max(0, y0 - 2); y <= Math.min(H - 1, y1 + 2); y++) for (let x = Math.max(0, x0 - 2); x <= Math.min(W - 1, x1 + 2); x++) SE.er[y * W + x] = 255;
+    removed++;
+  }
+  sigEdRender();
+  toast(`ลบจุดสกปรก ${removed} จุด`, 'ok', [], 2000);
+}
+
+// ---- pointer handling on the stage
+(() => {
+  const st = $('sigEdStage');
+  const pts = new Map();
+  let act = null;   // { kind:'erase'|'pick'|'crop'|'pan'|'pinch', ... }
+  const cur = $('sigEdCursor');
+  const showCursor = (e) => {
+    if (SE.step !== 'clean' || SE.tool !== 'erase' || e.pointerType === 'touch') { cur.classList.add('hidden'); return; }
+    const r = st.getBoundingClientRect(), d = SE.size * 2;
+    Object.assign(cur.style, { left: e.clientX - r.left - SE.size + 'px', top: e.clientY - r.top - SE.size + 'px', width: d + 'px', height: d + 'px' });
+    cur.classList.remove('hidden');
+  };
+  st.addEventListener('pointerleave', () => cur.classList.add('hidden'));
+  st.addEventListener('pointerdown', (e) => {
+    if (!SE.open) return;
+    e.preventDefault();
+    try { st.setPointerCapture(e.pointerId); } catch {}
+    pts.set(e.pointerId, e);
+    if (pts.size === 2) { // two fingers: pinch-zoom / pan (cancel the current stroke)
+      if (act && act.kind === 'erase' && act.pushed) { sigEdUndo(); SE.redo.pop(); sigEdUndoBtns(); }
+      $('sigEdRect').classList.add('hidden');
+      const [a, b] = [...pts.values()];
+      act = { kind: 'pinch', d0: Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), z0: SE.view.z, m0: [(a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2], v0: { ...SE.view } };
+      return;
+    }
+    if (pts.size > 2) return;
+    const [x, y] = sigEdImgPt(e);
+    if (SE.step === 'crop') {
+      const h = e.target.closest('.sch'); const c = SE.crop;
+      act = { kind: 'crop', h: h ? h.dataset.h : (x > c.x && x < c.x + c.w && y > c.y && y < c.y + c.h ? 'move' : 'new'), sx: x, sy: y, c0: { ...c } };
+      return;
+    }
+    if (e.button === 1 || e.button === 2 || (e.pointerType === 'mouse' && e.shiftKey && false)) { act = { kind: 'pan', sx: e.clientX, sy: e.clientY, v0: { ...SE.view } }; return; }
+    if (SE.tool === 'erase') { act = { kind: 'erase', last: [x, y], pushed: false, r: SE.size / SE.view.z }; sigEdPush(); act.pushed = true; sigEdEraseSeg([x, y], [x, y], act.r); }
+    else act = { kind: 'pick', sx: x, sy: y, cx: e.clientX, cy: e.clientY, moved: false };
+  });
+  st.addEventListener('pointermove', (e) => {
+    showCursor(e);
+    if (!pts.has(e.pointerId)) return;
+    pts.set(e.pointerId, e);
+    if (!act) return;
+    if (act.kind === 'pinch' && pts.size >= 2) {
+      const [a, b] = [...pts.values()];
+      const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY), m = [(a.clientX + b.clientX) / 2, (a.clientY + b.clientY) / 2];
+      const r = st.getBoundingClientRect(), v0 = act.v0;
+      const z = Math.max(0.05, Math.min(16, act.z0 * d / act.d0));
+      const px = (act.m0[0] - r.left - v0.tx) / v0.z, py = (act.m0[1] - r.top - v0.ty) / v0.z;
+      SE.view = { z, tx: m[0] - r.left - px * z, ty: m[1] - r.top - py * z };
+      sigEdApplyView();
+      return;
+    }
+    if (act.kind === 'pan') { SE.view = { ...act.v0, tx: act.v0.tx + e.clientX - act.sx, ty: act.v0.ty + e.clientY - act.sy }; sigEdApplyView(); return; }
+    const [x, y] = sigEdImgPt(e);
+    if (act.kind === 'erase') { const evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e]; for (const ev of evs.length ? evs : [e]) { const p = sigEdImgPt(ev); sigEdEraseSeg(act.last, p, act.r); act.last = p; } return; }
+    if (act.kind === 'pick') {
+      if (!act.moved && Math.hypot(e.clientX - act.cx, e.clientY - act.cy) < 6) return;
+      act.moved = true; act.ex = x; act.ey = y;
+      const v = SE.view, R = $('sigEdRect');
+      Object.assign(R.style, { left: v.tx + Math.min(act.sx, x) * v.z + 'px', top: v.ty + Math.min(act.sy, y) * v.z + 'px', width: Math.abs(x - act.sx) * v.z + 'px', height: Math.abs(y - act.sy) * v.z + 'px' });
+      R.classList.remove('hidden');
+      return;
+    }
+    if (act.kind === 'crop') {
+      const c = { ...act.c0 }, dx = x - act.sx, dy = y - act.sy, W = SE.src.width, H = SE.src.height, m = 8 / SE.view.z;
+      if (act.h === 'move') { c.x = Math.max(0, Math.min(W - c.w, c.x + dx)); c.y = Math.max(0, Math.min(H - c.h, c.y + dy)); }
+      else if (act.h === 'new') { c.x = Math.max(0, Math.min(act.sx, x)); c.y = Math.max(0, Math.min(act.sy, y)); c.w = Math.min(W, Math.max(act.sx, x)) - c.x; c.h = Math.min(H, Math.max(act.sy, y)) - c.y; }
+      else {
+        let x0 = c.x, y0 = c.y, x1 = c.x + c.w, y1 = c.y + c.h;
+        if (act.h.includes('w')) x0 = Math.max(0, Math.min(x1 - m * 3, x0 + dx));
+        if (act.h.includes('e')) x1 = Math.min(W, Math.max(x0 + m * 3, x1 + dx));
+        if (act.h.includes('n')) y0 = Math.max(0, Math.min(y1 - m * 3, y0 + dy));
+        if (act.h.includes('s')) y1 = Math.min(H, Math.max(y0 + m * 3, y1 + dy));
+        Object.assign(c, { x: x0, y: y0, w: x1 - x0, h: y1 - y0 });
+      }
+      SE.crop = { x: Math.round(c.x), y: Math.round(c.y), w: Math.max(1, Math.round(c.w)), h: Math.max(1, Math.round(c.h)) };
+      sigCropDraw();
+    }
+  });
+  const up = (e) => {
+    if (!pts.has(e.pointerId)) return;
+    pts.delete(e.pointerId);
+    if (!act) return;
+    if (act.kind === 'pinch') { if (!pts.size) act = null; return; }
+    if (act.kind === 'pick') {
+      $('sigEdRect').classList.add('hidden');
+      if (act.moved) sigEdEraseRect(act.sx, act.sy, act.ex, act.ey); else sigEdPick(act.sx, act.sy);
+    }
+    if (act.kind === 'crop' && act.h === 'new' && SE.crop.w < 10 && SE.crop.h < 10) { SE.crop = act.c0; sigCropDraw(); }
+    act = null;
+  };
+  st.addEventListener('pointerup', up); st.addEventListener('pointercancel', up);
+  st.addEventListener('contextmenu', (e) => { e.preventDefault(); e.stopPropagation(); });
+  st.addEventListener('wheel', (e) => {
+    if (!SE.open) return;
+    e.preventDefault();
+    if (e.ctrlKey || e.metaKey) sigEdZoomAt(SE.view.z * (e.deltaY < 0 ? 1.15 : 1 / 1.15), e.clientX, e.clientY);
+    else if (SE.step === 'clean') { SE.view.tx -= e.shiftKey ? e.deltaY : e.deltaX; SE.view.ty -= e.shiftKey ? 0 : e.deltaY; sigEdApplyView(); }
+  }, { passive: false });
+})();
+
+// ---- wiring
+$('sigEdClose').onclick = sigCloseEditor;
+$('sigEdUndo').onclick = sigEdUndo; $('sigEdRedo').onclick = sigEdRedo;
+$('sigEd').querySelectorAll('.sigsteps button').forEach((b) => b.onclick = () => sigEdStep(b.dataset.s));
+$('sigEdRot').onclick = sigCropRotate;
+$('sigEdAuto').onclick = () => { SE.crop = SE.keepAlpha ? sigAlphaBox(SE.src) : sigAutoCrop(SE.src); sigCropDraw(); };
+$('sigEdFull').onclick = () => { SE.crop = { x: 0, y: 0, w: SE.src.width, h: SE.src.height }; sigCropDraw(); };
+$('sigEdOk').onclick = async () => {
+  if (SE.step === 'crop') { sigEdStep('clean'); return; }
+  const out = sigEdResult();
+  if (!out) { toast('ไม่เหลือส่วนที่เป็น' + sigKindName(SE.kind) + 'แล้ว — กดเลิกทำ หรือลดการลบ', 'err'); return; }
+  const fn = SE.onDone; sigCloseEditor();
+  busy('กำลังบันทึกลงคลัง …');
+  try { await fn(out); } catch (e) { toast('บันทึกไม่สำเร็จ: ' + e.message, 'err'); }
+  unbusy();
+};
+$('sigEdCleanBar').querySelectorAll('[data-t]').forEach((b) => b.onclick = () => sigEdTool(b.dataset.t));
+$('sigEdSize').oninput = (e) => { if (SE.tool === 'erase') SE.size = +e.target.value; else SE.group = +e.target.value; };
+$('sigEdThr').oninput = (e) => { SE.thr = +e.target.value; clearTimeout(SE.thrT); SE.thrT = setTimeout(() => { sigEdExtract(); sigEdRender(); }, 60); };
+$('sigEdSpeck').onclick = sigEdDespeckle;
+$('sigEdReset').onclick = () => { if (SE.er.some((v) => v)) { sigEdPush(); SE.er = new Uint8Array(SE.W * SE.H); sigEdRender(); } };
+$('sigEdZoomIn').onclick = () => sigEdZoomAt(SE.view.z * 1.25);
+$('sigEdZoomOut').onclick = () => sigEdZoomAt(SE.view.z / 1.25);
+$('sigEdZoomFit').onclick = sigEdFit;
+window.addEventListener('resize', () => { if (SE.open) sigEdFit(); });
+
+// ---- panel / props wiring
+$('annSig').onclick = () => ($('sigPanel').classList.contains('hidden') ? sigOpenPanel() : sigClosePanel());
+$('sigPanelClose').onclick = sigClosePanel;
+$('sigMenuBtn').onclick = (e) => { const r = e.currentTarget.getBoundingClientRect(); sigLibMenu(r.left, r.top - 8); if (ctxEl) ctxEl.style.top = Math.max(4, r.top - ctxEl.offsetHeight - 6) + 'px'; };
+$('sigPanel').querySelectorAll('.sigtabs button').forEach((b) => b.onclick = () => { SIG.tab = b.dataset.k; sigRenderPanel(); });
+$('sigColors').innerHTML = SIG_COLORS.map((c) => c ? `<button data-c="${c}" style="background:${c}" title="${c}"></button>` : '<button class="orig" title="สีเดิม"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M6.5 17.5l11-11"/></svg></button>').join('');
+$('sigColors').querySelectorAll('button').forEach((b) => b.onclick = () => sigApplyProps({ color: b.dataset.c || null }));
+$('sigWeight').oninput = (e) => sigApplyProps({ weight: Math.round(+e.target.value * 10) / 10 });
+$('sigAll').onchange = () => { const a = findAnn(annSel); if ($('sigAll').checked && a && a.kind === 'img') sigApplyProps({ color: a.color, weight: a.weight || 0 }); };
+$('sigPropsOk').onclick = sigCloseProps;
+
+// keyboard while the full-screen editors are open
+window.addEventListener('keydown', (e) => {
+  if (!sigOverlayOpen() || !$('modal').classList.contains('hidden')) return;
+  const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
+  const drawOpen = !$('sigDraw').classList.contains('hidden');
+  let handled = true;
+  if (e.key === 'Escape') { drawOpen ? sigDrawClose() : sigCloseEditor(); }
+  else if (c && k === 'z' && !e.shiftKey) drawOpen ? $('sigDrawUndo').click() : sigEdUndo();
+  else if (c && (k === 'y' || (k === 'z' && e.shiftKey))) drawOpen ? $('sigDrawRedo').click() : sigEdRedo();
+  else if (e.key === 'Enter' || (c && k === 's')) drawOpen ? (!$('sigDrawOk').disabled && $('sigDrawOk').click()) : $('sigEdOk').click();
+  else if (!drawOpen && SE.step === 'clean' && !c && k === 'e') sigEdTool('erase');
+  else if (!drawOpen && SE.step === 'clean' && !c && k === 'v') sigEdTool('pick');
+  else if (!drawOpen && c && (e.key === '=' || e.key === '+')) sigEdZoomAt(SE.view.z * 1.25);
+  else if (!drawOpen && c && e.key === '-') sigEdZoomAt(SE.view.z / 1.25);
+  else if (!drawOpen && c && e.key === '0') sigEdFit();
+  else if (c || e.key === 'Delete' || e.key === 'Backspace' || e.key.startsWith('Arrow')) { /* swallow document shortcuts */ }
+  else handled = false;
+  if (handled) { e.preventDefault(); e.stopImmediatePropagation(); }
+}, true);
+
+
+// ------------------------------------------------------------------ v1.9 scanned pages -> Word (Thai OCR, offline)
+// worker: web/ocr/ocr-worker.js (onnxruntime-web, PP-OCRv5 detection + Thai recognition). Page structure rules and the
+// .docx writer live here. Form-like pages (many ruled boxes) are inserted as pictures; words the model was unsure of
+// are highlighted yellow so they are quick to check.
+const OCRW = { worker: null, ready: null, seq: 0, wait: new Map() };
+function ocrBase() { return new URL(PACKED ? './ocr/' : './ocr/', location.href).href; }
+function ocrWorker() {
+  if (OCRW.ready) return OCRW.ready;
+  OCRW.ready = new Promise((resolve, reject) => {
+    let w;
+    try { w = new Worker(ocrBase() + 'ocr-worker.js', { type: 'module' }); } catch (e) { reject(new Error('เบราว์เซอร์นี้เปิดตัวอ่านข้อความไม่ได้: ' + e.message)); return; }
+    OCRW.worker = w;
+    w.onmessage = (e) => {
+      const m = e.data;
+      if (m.type === 'ready') resolve(w);
+      else if (m.type === 'error' && m.id == null) { reject(new Error(m.message)); }
+      else if (OCRW.wait.has(m.id)) { const p = OCRW.wait.get(m.id); OCRW.wait.delete(m.id); m.type === 'error' ? p.rej(new Error(m.message)) : p.res(m); }
+    };
+    w.onerror = (e) => reject(new Error(e.message || 'โหลดตัวอ่านข้อความไม่สำเร็จ'));
+    w.postMessage({ type: 'init', base: ocrBase() });
+  });
+  OCRW.ready.catch(() => { OCRW.ready = null; if (OCRW.worker) OCRW.worker.terminate(); OCRW.worker = null; });
+  return OCRW.ready;
+}
+async function ocrCanvas(canvas) {
+  const w = await ocrWorker();
+  const g = canvas.getContext('2d');
+  const img = g.getImageData(0, 0, canvas.width, canvas.height);
+  const id = ++OCRW.seq;
+  return new Promise((res, rej) => {
+    OCRW.wait.set(id, { res, rej });
+    w.postMessage({ type: 'page', id, w: img.width, h: img.height, data: img.data.buffer }, [img.data.buffer]);
+  });
+}
+
+// ---- text helpers (a "txt" is { t, low } where low marks uncertain characters with '1')
+const OW_TH = (ch) => ch >= '\u0e00' && ch <= '\u0e7f';
+const owT = (t, low) => ({ t, low: low || '0'.repeat(t.length) });
+function owJoin(parts, sep = ' ') { // like ' '.join, keeps the uncertainty mask
+  const out = { t: '', low: '' };
+  for (const p of parts) {
+    if (!p.t) continue;
+    if (out.t) { out.t += sep; out.low += '0'.repeat(sep.length); }
+    out.t += p.t; out.low += p.low;
+  }
+  return out;
+}
+function owJoinLines(parts) { // Thai wrapped lines join without a space
+  const out = { t: '', low: '' };
+  for (const p of parts) {
+    if (!p.t) continue;
+    if (out.t) { const sp = OW_TH(out.t[out.t.length - 1]) && OW_TH(p.t[0]) ? '' : ' '; out.t += sp; out.low += '0'.repeat(sp.length); }
+    out.t += p.t; out.low += p.low;
+  }
+  return out;
+}
+// amounts: digits are reliable, separators are not ('1.77.23', '7,000,000,00', '51,732,008:24', '12;000.00')
+function owFixNumbers(x) {
+  const re = /(^|[^\d/])(\(?)(\d[\d.,:;]*[.,:;])(\d{2})(\)?)(?![\d/])/g;
+  let out = '', low = '', last = 0, m;
+  while ((m = re.exec(x.t))) {
+    const body = m[3], groups = body.slice(0, -1).split(/[.,:;]/);
+    const start = m.index + m[1].length, end = m.index + m[0].length;
+    let fixed = null;
+    if (!(groups.slice(1).some((g) => g.length > 3) || (groups[0].length > 3 && groups.length > 1))) {
+      const ip = groups.join('');
+      if (/^\d{1,13}$/.test(ip)) fixed = m[2] + Number(ip).toLocaleString('en-US') + '.' + m[4] + m[5];
+    }
+    const orig = x.t.slice(start, end);
+    out += x.t.slice(last, start); low += x.low.slice(last, start);
+    if (fixed && fixed !== orig) { out += fixed; low += '1'.repeat(fixed.length); }      // repaired -> ask the user to look
+    else { out += orig; low += x.low.slice(start, end); }
+    last = end;
+  }
+  out += x.t.slice(last); low += x.low.slice(last);
+  return { t: out, low };
+}
+
+// ---- page structure (rows, amount columns, tables, paragraphs)
+const OW_AMT = /^\(?-?\d{1,3}(?:,\d{3})*\.\d{2}\)?$|^\(?\d+\.\d{2}\)?$/;
+const OW_DASH = /^[-–—]$/;
+const owIsAmt = (t) => OW_AMT.test(t) || OW_DASH.test(t);
+const OW_STAMP = /^[A-Z0-9 .,()\-:]{2,24}$/;
+function owTokens(res) {
+  const out = [];
+  for (const l of res.lines) {
+    let x = owFixNumbers(owT(l.t, l.low));
+    // '1,989, 159.84' -> one amount (remove the space and its mask char)
+    const rm = [];
+    x.t.replace(/(?<=\d,)\s+(?=\d{3})|(?<=\d)\s+(?=[.,]\d{2}\b)/g, (s, i) => { rm.push([i, s.length]); return s; });
+    for (let k = rm.length - 1; k >= 0; k--) { const [i, n] = rm[k]; x = { t: x.t.slice(0, i) + x.t.slice(i + n), low: x.low.slice(0, i) + x.low.slice(i + n) }; }
+    const tt = x.t.trim(); if (!tt) continue;
+    const lead = x.t.indexOf(tt); x = { t: tt, low: x.low.slice(lead, lead + tt.length) };
+    if (l.c < 0.7 && !/\d[\d,]*\.\d{2}/.test(x.t)) continue;                       // stamp / signature scribbles
+    if (OW_STAMP.test(x.t) && /[A-Z]{2}/.test(x.t) && l.c < 0.97) continue;
+    const parts = x.t.split(' ');
+    if (parts.length > 1 && parts.some(owIsAmt)) {
+      const tot = parts.reduce((s, p) => s + p.length, 0) + parts.length - 1, w = l.b[2] - l.b[0];
+      let px = l.b[0], pos = 0;
+      for (const p of parts) {
+        const pw = w * p.length / tot;
+        out.push({ ...owT(p, x.low.slice(pos, pos + p.length)), b: [px, l.b[1], px + pw, l.b[3]] });
+        px += pw + w / tot; pos += p.length + 1;
+      }
+    } else out.push({ ...x, b: l.b });
+  }
+  return out;
+}
+const owMed = (a) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+const owPct = (a, q) => { const s = [...a].sort((x, y) => x - y); return s.length ? s[Math.min(s.length - 1, Math.max(0, Math.round(q * (s.length - 1))))] : 0; };
+function owRows(items, mh) {
+  items = [...items].sort((a, b) => (a.b[1] + a.b[3]) - (b.b[1] + b.b[3]));
+  const rows = []; let cur = [];
+  for (const it of items) {
+    const cy = (it.b[1] + it.b[3]) / 2;
+    if (cur.length && Math.abs(cy - cur.reduce((s, c) => s + (c.b[1] + c.b[3]) / 2, 0) / cur.length) > mh * 0.55) { rows.push(cur); cur = []; }
+    cur.push(it);
+  }
+  if (cur.length) rows.push(cur);
+  return rows.map((r) => r.sort((a, b) => a.b[0] - b.b[0]));
+}
+function owPageBlocks(res) {
+  const W = res.w, H = res.h;
+  const items = owTokens(res);
+  if (!items.length) return [];
+  const mh = owMed(items.map((it) => it.b[3] - it.b[1]));
+  const rows = owRows(items, mh);
+  const edges = rows.flat().filter((it) => owIsAmt(it.t)).map((it) => it.b[2]).sort((a, b) => a - b);
+  let cl = [];
+  for (const e of edges) { if (cl.length && e - cl[cl.length - 1][cl[cl.length - 1].length - 1] < W * 0.03) cl[cl.length - 1].push(e); else cl.push([e]); }
+  const cols = cl.filter((c) => c.length >= 3).map(owMed);
+  const colOf = (it) => {
+    if (!cols.length) return null;
+    let j = 0; cols.forEach((c, k) => { if (Math.abs(it.b[2] - c) < Math.abs(it.b[2] - cols[j])) j = k; });
+    return Math.abs(it.b[2] - cols[j]) < W * 0.05 ? j : null;
+  };
+  const info = rows.map((r) => {
+    const amts = r.filter((it) => owIsAmt(it.t)).map((it) => [colOf(it), it]).filter(([j]) => j != null);
+    const text = r.filter((it) => !amts.some(([, a]) => a === it));
+    return { r, amts, text, x0: Math.min(...r.map((it) => it.b[0])), x1: Math.max(...r.map((it) => it.b[2])), y0: Math.min(...r.map((it) => it.b[1])) };
+  });
+  const isAmtRow = info.map((x) => x.amts.length > 0);
+  const inT = info.map(() => false);
+  if (isAmtRow.filter(Boolean).length >= 3 && cols.length) {
+    const labRight = Math.min(...cols) - W * 0.12;
+    isAmtRow.forEach((v, i) => { if (v) inT[i] = true; });
+    const nearAmtBelow = (i) => { for (let k = i + 1; k < Math.min(info.length, i + 4); k++) if (isAmtRow[k]) return true; return false; };
+    for (let i = 0; i < info.length; i++) {          // header rows above the amounts
+      if (inT[i] || !nearAmtBelow(i)) continue;
+      const r = info[i], t = r.r.map((it) => it.t).join(' ');
+      if (r.x0 > labRight || (/25\d\d/.test(t) && r.x1 - r.x0 < W * 0.7 && r.x0 > W * 0.3)) inT[i] = 'h';
+    }
+    for (let i = 0; i < info.length; i++) {          // section titles inside the table
+      if (inT[i]) continue;
+      let prev = i > 0 && inT[i - 1] === 'h';
+      for (let k = Math.max(0, i - 3); k < i; k++) if (inT[k]) prev = true;
+      if (prev && nearAmtBelow(i) && info[i].x1 - info[i].x0 < W * 0.55) inT[i] = true;
+    }
+  }
+  const textRows = info.filter((_, i) => !inT[i]);
+  const left = textRows.length ? owPct(textRows.map((x) => x.x0), 0.2) : 0;
+  const right = textRows.length ? owPct(textRows.map((x) => x.x1), 0.9) : W;
+  const full = Math.max(1, right - left);
+  const blocks = []; let para = [];
+  const flush = () => { if (para.length) { blocks.push({ type: 'p', x: owJoinLines(para) }); para = []; } };
+  const mincol = cols.length ? Math.min(...cols) : W;
+  let i = 0;
+  while (i < info.length) {
+    const x = info[i];
+    if (inT[i]) {
+      flush();
+      const tb = { type: 'table', cols: cols.length, header: [], rows: [] };
+      const tr = []; for (let k = i; k < info.length && inT[k]; k++) if (inT[k] === true) tr.push(info[k].x0);
+      const labX0 = tr.length ? Math.min(...tr) : x.x0;
+      while (i < info.length && inT[i]) {
+        const y = info[i];
+        if (inT[i] === 'h') {
+          const cells = cols.map(() => owT(''));
+          for (const it of y.r) for (const word of (it.t.includes('หมายเหตุ') ? it.t.split(' ') : [it.t])) {
+            if (word === 'หมายเหตุ') continue;
+            const cx = (it.b[0] + it.b[2]) / 2; let j = 0;
+            cols.forEach((c, k) => { if (Math.abs(cx - c + W * 0.04) < Math.abs(cx - cols[j] + W * 0.04)) j = k; });
+            cells[j] = owJoin([cells[j], word === it.t ? it : owT(word)]);
+          }
+          tb.header.push(cells);
+        } else {
+          const vals = cols.map(() => owT(''));
+          for (const [j, it] of y.amts) vals[j] = it;
+          const txt = [...y.text]; let note = '';
+          const last = txt[txt.length - 1];
+          if (last && /^\d{1,2}$/.test(last.t) && last.b[0] > W * 0.4) note = txt.pop().t;
+          else if (last) {
+            const m = last.t.match(/^(.*\D)\s+(\d{1,2})$/);
+            if (m && last.b[2] > W * 0.45 && last.b[2] < mincol - W * 0.08) { txt[txt.length - 1] = { ...last, t: m[1], low: last.low.slice(0, m[1].length) }; note = m[2]; }
+          }
+          const lab = owJoin(txt.filter((it) => it.b[2] < mincol - W * 0.03 || !/^\d{1,2}$/.test(it.t)));
+          const lvl = Math.max(0, Math.min(3, Math.round((y.x0 - labX0) / (W * 0.022))));
+          const bold = !y.amts.length || /^รวม/.test(lab.t.replace(/\s/g, '')) || /^กำไร/.test(lab.t);
+          tb.rows.push({ label: lab, note, vals, indent: lvl, bold });
+        }
+        i++;
+      }
+      tb.hasNote = tb.rows.some((r) => r.note);
+      blocks.push(tb); continue;
+    }
+    const t = owJoin(x.r);
+    const cx = (x.x0 + x.x1) / 2, wrel = (x.x1 - x.x0) / full;
+    if (Math.abs(cx - W / 2) < W * 0.05 && wrel < 0.75 && x.x0 - left > W * 0.06) { flush(); blocks.push({ type: 'center', x: t, bold: x.y0 < H * 0.25 }); i++; continue; }
+    if (x.x0 - left > W * 0.33) { flush(); blocks.push({ type: 'right', x: t }); i++; continue; }
+    const ind = x.x0 - left > W * 0.025, rel = (x.x1 - left) / full;
+    const nx = i + 1 < info.length && !inT[i + 1] ? info[i + 1] : null;
+    const nxtInd = !!nx && nx.x0 - left > W * 0.025 && nx.x0 - left < W * 0.2;
+    if (ind && para.length) flush();
+    if (!ind && rel < 0.55 && t.t.length < 70 && (nxtInd || !nx || (i + 1 < info.length && inT[i + 1])) && !para.length) { blocks.push({ type: 'h', x: t }); i++; continue; }
+    para.push(t);
+    if (rel < 0.6) flush();
+    i++;
+  }
+  flush();
+  return blocks;
+}
+function owIsForm(res) {
+  const nAmt = res.lines.reduce((s, l) => s + (l.t.match(/\d{1,3}(?:,\d{3})*\.\d{2}/g) || []).length, 0);
+  const scale = 1654 / res.w;                       // thresholds were measured at 200 dpi on A4
+  return res.vl * scale > 3000 || (res.lines.length > 100 && nAmt < 0.1 * res.lines.length);
+}
+
+// ---- minimal .docx writer (WordprocessingML + stored zip)
+const OW_FONT = 'TH Sarabun New';
+const owEsc = (s) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+function owRuns(x, o = {}) {
+  const sz = o.size || 32, out = [];
+  const rpr = (low) => `<w:rPr><w:rFonts w:ascii="${OW_FONT}" w:hAnsi="${OW_FONT}" w:cs="${OW_FONT}"/>${o.bold ? '<w:b/><w:bCs/>' : ''}${low ? '<w:highlight w:val="yellow"/>' : ''}<w:sz w:val="${sz}"/><w:szCs w:val="${sz}"/></w:rPr>`;
+  let k = 0;
+  while (k < x.t.length) {
+    // uncertain spans are widened to the whole Thai syllable cluster around them
+    const lowAt = (j) => x.low[j] === '1';
+    let j = k; const lw = lowAt(k);
+    while (j < x.t.length && lowAt(j) === lw) j++;
+    out.push(`<w:r>${rpr(lw)}<w:t xml:space="preserve">${owEsc(x.t.slice(k, j))}</w:t></w:r>`);
+    k = j;
+  }
+  return out.join('') || `<w:r>${rpr(false)}<w:t></w:t></w:r>`;
+}
+function owPara(x, o = {}) {
+  const ppr = [];
+  if (o.keepNext) ppr.push('<w:keepNext/>');
+  if (o.pageBreakBefore) ppr.push('<w:pageBreakBefore/>');
+  ppr.push(`<w:spacing w:before="${o.before || 0}" w:after="${o.after == null ? 60 : o.after}"/>`);
+  if (o.firstLine || o.left) ppr.push(`<w:ind${o.left ? ` w:left="${o.left}"` : ''}${o.firstLine ? ` w:firstLine="${o.firstLine}"` : ''}/>`);
+  if (o.align) ppr.push(`<w:jc w:val="${o.align}"/>`);
+  return `<w:p><w:pPr>${ppr.join('')}</w:pPr>${x ? owRuns(x, o) : ''}</w:p>`;
+}
+const OW_TW = 11906 - 2 * 1134;
+function owTable(b) {
+  const n = b.cols, note = b.hasNote;
+  const amtW = Math.min(2200, Math.round(OW_TW * 0.2)), noteW = note ? 1250 : 0, labW = OW_TW - amtW * n - noteW;
+  const widths = [labW, ...(note ? [noteW] : []), ...Array(n).fill(amtW)];
+  const bd = (top, bottom) => `<w:tcBorders><w:top w:val="${top || 'nil'}" w:sz="6" w:space="0" w:color="000000"/><w:left w:val="nil"/><w:bottom w:val="${bottom || 'nil'}" w:sz="6" w:space="0" w:color="000000"/><w:right w:val="nil"/></w:tcBorders>`;
+  const cell = (x, w, o = {}) => `<w:tc><w:tcPr><w:tcW w:w="${w}" w:type="dxa"/>${bd(o.top, o.bottom)}</w:tcPr>${owPara(x, { align: o.align, left: o.indent, bold: o.bold, size: 30, after: 0 })}</w:tc>`;
+  const rows = [];
+  b.header.forEach((h, k) => {
+    const last = k === b.header.length - 1, bot = last ? 'single' : null;
+    rows.push(`<w:tr><w:trPr><w:tblHeader/></w:trPr>${cell(null, labW, { bottom: bot })}${note ? cell(owT(last ? 'หมายเหตุ' : ''), noteW, { align: 'center', bottom: bot, bold: true }) : ''}${h.map((c) => cell(c, amtW, { align: 'right', bold: true, bottom: bot })).join('')}</w:tr>`);
+  });
+  b.rows.forEach((r, k) => {
+    const total = r.bold && r.vals.some((v) => v.t), lastRow = k === b.rows.length - 1;
+    rows.push(`<w:tr><w:trPr><w:cantSplit/></w:trPr>${cell(r.label, labW, { bold: r.bold, indent: r.indent * 360 })}${note ? cell(owT(r.note || ''), noteW, { align: 'center' }) : ''}${r.vals.map((v) => cell(v, amtW, { align: 'right', top: total ? 'single' : null, bottom: total && lastRow ? 'double' : null })).join('')}</w:tr>`);
+  });
+  return `<w:tbl><w:tblPr><w:tblW w:w="${OW_TW}" w:type="dxa"/><w:tblLayout w:type="fixed"/><w:tblCellMar><w:left w:w="60" w:type="dxa"/><w:right w:w="60" w:type="dxa"/></w:tblCellMar></w:tblPr><w:tblGrid>${widths.map((w) => `<w:gridCol w:w="${w}"/>`).join('')}</w:tblGrid>${rows.join('')}</w:tbl>`;
+}
+function owImage(rid, idx, wpx, hpx) { // inline picture, fitted into the text area
+  const maxW = OW_TW * 635, maxH = (16838 - 2 * 1134) * 635 * 0.97;
+  const k = Math.min(maxW / wpx, maxH / hpx), cx = Math.round(wpx * k), cy = Math.round(hpx * k);
+  return `<w:p><w:pPr><w:spacing w:before="0" w:after="0"/><w:jc w:val="center"/></w:pPr><w:r><w:drawing><wp:inline distT="0" distB="0" distL="0" distR="0"><wp:extent cx="${cx}" cy="${cy}"/><wp:docPr id="${idx}" name="หน้า ${idx}" descr="หน้าแบบฟอร์มจากต้นฉบับ (แทรกเป็นภาพ)"/><a:graphic xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:pic xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"><pic:nvPicPr><pic:cNvPr id="${idx}" name="page${idx}.jpg"/><pic:cNvPicPr/></pic:nvPicPr><pic:blipFill><a:blip r:embed="${rid}"/><a:stretch><a:fillRect/></a:stretch></pic:blipFill><pic:spPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="${cx}" cy="${cy}"/></a:xfrm><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></pic:spPr></pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r></w:p>`;
+}
+function owDocx(pages) { // pages: [{ kind:'form', jpg:Uint8Array, w, h } | { kind:'text', blocks }]
+  const body = [], media = [];
+  pages.forEach((pg, pi) => {
+    const pb = pi > 0;
+    if (pg.kind === 'form') {
+      media.push(pg.jpg);
+      const rid = 'rIdImg' + media.length;
+      body.push(pb ? owPara(null, { pageBreakBefore: true, after: 0 }) : '');
+      body.push(owImage(rid, media.length, pg.w, pg.h));
+      return;
+    }
+    let first = true;
+    const P = (x, o) => { const s = owPara(x, { ...o, pageBreakBefore: pb && first }); first = false; return s; };
+    if (!pg.blocks.length) body.push(P(owT(''), {}));
+    for (const b of pg.blocks) {
+      if (b.type === 'center') body.push(P(b.x, { align: 'center', bold: b.bold }));
+      else if (b.type === 'right') body.push(P(b.x, { left: Math.round(OW_TW * 0.5) }));
+      else if (b.type === 'h') body.push(P(b.x, { bold: true, before: 120, after: 40, keepNext: true }));
+      else if (b.type === 'p') body.push(P(b.x, { align: 'thaiDistribute', firstLine: 720, after: 80 }));
+      else if (b.type === 'table') {
+        if (first) body.push(P(owT(''), { after: 0 }));
+        body.push(owTable(b)); body.push(owPara(owT(''), { after: 0 }));
+      }
+    }
+  });
+  const NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"';
+  const doc = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:document ${NS}><w:body>${body.join('')}<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567" w:gutter="0"/></w:sectPr></w:body></w:document>`;
+  const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:docDefaults><w:rPrDefault><w:rPr><w:rFonts w:ascii="${OW_FONT}" w:hAnsi="${OW_FONT}" w:cs="${OW_FONT}" w:eastAsia="${OW_FONT}"/><w:sz w:val="32"/><w:szCs w:val="32"/><w:lang w:val="en-US" w:bidi="th-TH"/></w:rPr></w:rPrDefault><w:pPrDefault><w:pPr><w:spacing w:after="60" w:line="240" w:lineRule="auto"/></w:pPr></w:pPrDefault></w:docDefaults><w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/></w:style><w:style w:type="table" w:default="1" w:styleId="TableNormal"><w:name w:val="Normal Table"/><w:tblPr><w:tblInd w:w="0" w:type="dxa"/><w:tblCellMar><w:top w:w="0" w:type="dxa"/><w:left w:w="108" w:type="dxa"/><w:bottom w:w="0" w:type="dxa"/><w:right w:w="108" w:type="dxa"/></w:tblCellMar></w:tblPr></w:style></w:styles>`;
+  const rels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>${media.map((_, k) => `<Relationship Id="rIdImg${k + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/page${k + 1}.jpg"/>`).join('')}</Relationships>`;
+  const files = [
+    ['[Content_Types].xml', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Default Extension="jpg" ContentType="image/jpeg"/><Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/><Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>`],
+    ['_rels/.rels', `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>`],
+    ['word/document.xml', doc], ['word/styles.xml', styles], ['word/_rels/document.xml.rels', rels],
+    ...media.map((m, k) => [`word/media/page${k + 1}.jpg`, m]),
+  ];
+  return owZip(files);
+}
+const OW_CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+function owCrc(u8) { let c = 0xffffffff; for (let i = 0; i < u8.length; i++) c = OW_CRC[(c ^ u8[i]) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; }
+function owZip(files) { // deflate (pako) for xml, store for jpg
+  const enc = new TextEncoder(), parts = [], central = [];
+  let off = 0;
+  for (const [name, data] of files) {
+    const raw = typeof data === 'string' ? enc.encode(data) : data;
+    const nm = enc.encode(name), crc = owCrc(raw);
+    const comp = typeof data === 'string' ? pako.deflateRaw(raw) : raw, method = typeof data === 'string' ? 8 : 0;
+    const lh = new DataView(new ArrayBuffer(30));
+    lh.setUint32(0, 0x04034b50, true); lh.setUint16(4, 20, true); lh.setUint16(6, 0x0800, true); lh.setUint16(8, method, true);
+    lh.setUint32(14, crc, true); lh.setUint32(18, comp.length, true); lh.setUint32(22, raw.length, true); lh.setUint16(26, nm.length, true);
+    parts.push(new Uint8Array(lh.buffer), nm, comp);
+    const ch = new DataView(new ArrayBuffer(46));
+    ch.setUint32(0, 0x02014b50, true); ch.setUint16(4, 20, true); ch.setUint16(6, 20, true); ch.setUint16(8, 0x0800, true); ch.setUint16(10, method, true);
+    ch.setUint32(16, crc, true); ch.setUint32(20, comp.length, true); ch.setUint32(24, raw.length, true); ch.setUint16(28, nm.length, true); ch.setUint32(42, off, true);
+    central.push(new Uint8Array(ch.buffer), nm);
+    off += 30 + nm.length + comp.length;
+  }
+  const csize = central.reduce((s, p) => s + p.length, 0);
+  const end = new DataView(new ArrayBuffer(22));
+  end.setUint32(0, 0x06054b50, true); end.setUint16(8, files.length, true); end.setUint16(10, files.length, true); end.setUint32(12, csize, true); end.setUint32(16, off, true);
+  const all = [...parts, ...central, new Uint8Array(end.buffer)];
+  const out = new Uint8Array(all.reduce((s, p) => s + p.length, 0)); let p = 0;
+  for (const a of all) { out.set(a, p); p += a.length; }
+  return out;
+}
+
+// ---- the command
+async function convertScanWord() {
+  const list = convList(); if (!list.length) return;
+  const r = await dialog({
+    title: 'แปลงเอกสารสแกนเป็น Word (อ่านภาษาไทย)',
+    body: `<p>${list.length} หน้า → ไฟล์ Word 1 ไฟล์ · ทำงานในเครื่องนี้ทั้งหมด ไม่ส่งเอกสารออกไปภายนอก</p>
+      <ul class="hint"><li>ย่อหน้า หัวข้อ และตารางตัวเลข (เช่น งบการเงิน) จะแก้ไขได้ใน Word</li>
+      <li>หน้าที่เป็นแบบฟอร์มช่องกรอกจำนวนมาก (เช่น ภ.ง.ด.) จะแทรกเป็นภาพหน้าเดิม</li>
+      <li>คำที่ระบบอ่านไม่มั่นใจจะ<b style="background:#ff0">ไฮไลต์สีเหลือง</b> — ควรตรวจทานก่อนใช้</li></ul>
+      <p class="hint">ใช้เวลาประมาณหน้าละ 10–30 วินาที${IS_TOUCH ? ' (บนมือถืออาจนานกว่านี้)' : ''} · ครั้งแรกต้องโหลดตัวอ่านข้อความประมาณ 16 MB</p>
+      <label class="radio"><input type="checkbox" name="noform"> แปลงทุกหน้าเป็นข้อความ (ไม่แทรกหน้าแบบฟอร์มเป็นภาพ)</label>`,
+    buttons: [['cancel', 'ยกเลิก'], ['ok', 'เริ่มแปลง', true]],
+  });
+  if (!r.btn) return;
+  const noForm = !!r.values.noform;
+  let cancelled = false;
+  const t0 = Date.now();
+  const show = (k, msg) => {
+    busy(msg);
+    let c = $('busy').querySelector('.ocrcancel');
+    if (!c) { c = document.createElement('button'); c.className = 'tbtn ocrcancel'; c.textContent = 'ยกเลิก'; c.onclick = () => { cancelled = true; c.disabled = true; c.textContent = 'กำลังยกเลิก…'; }; $('busy').querySelector('.busybox').appendChild(c); }
+  };
+  const done = () => { const c = $('busy').querySelector('.ocrcancel'); if (c) c.remove(); unbusy(); };
+  try {
+    show(0, 'กำลังเตรียมตัวอ่านข้อความภาษาไทย … (ครั้งแรกอาจใช้เวลาสักครู่)');
+    await ocrWorker();
+    const out = []; let low = 0, words = 0;
+    for (let k = 0; k < list.length; k++) {
+      if (cancelled) throw new Error('ยกเลิกแล้ว');
+      const el = Math.round((Date.now() - t0) / 1000), eta = k ? Math.round((Date.now() - t0) / 1000 / k * (list.length - k)) : null;
+      show(k, `กำลังอ่านหน้า ${k + 1}/${list.length} …${eta != null ? ` (เหลือประมาณ ${eta >= 60 ? Math.round(eta / 60) + ' นาที' : eta + ' วินาที'})` : ''}`);
+      const c = await renderPageCanvas(list[k], 200 / 72);
+      const jpg = await canvasToBytes(c, 'image/jpeg', 0.85);
+      const res = await ocrCanvas(c);
+      if (!noForm && owIsForm(res)) out.push({ kind: 'form', jpg, w: c.width, h: c.height });
+      else {
+        const blocks = owPageBlocks(res);
+        for (const l of res.lines) { words++; if (l.low.includes('1')) low++; }
+        out.push({ kind: 'text', blocks });
+      }
+      c.width = c.height = 0;
+    }
+    show(0, 'กำลังเขียนไฟล์ Word …');
+    const bytes = owDocx(out);
+    done();
+    const forms = out.filter((p) => p.kind === 'form').length;
+    await saveBytes(bytes, D.name + ' (OCR).docx', 'docx');
+    toast(`แปลงเสร็จ ${list.length} หน้า${forms ? ` (แทรกเป็นภาพ ${forms} หน้า)` : ''} · มีบรรทัดที่ควรตรวจทาน ${low}/${words} บรรทัด (ไฮไลต์สีเหลือง)`, 'ok', [], 8000);
+  } catch (e) { done(); if (!cancelled) toast('แปลงไม่สำเร็จ: ' + e.message, 'err', [], 9000); else toast('ยกเลิกการแปลงแล้ว'); }
+}
+
+
 // expose for automated testing
-window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; } };
+window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';

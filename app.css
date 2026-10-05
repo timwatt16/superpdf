@@ -371,3 +371,88 @@ svg.flip{transform:scaleX(-1)}
   .ieselbar .tbtn span{display:none}
   .iesel .iehandle{width:22px;height:22px;right:-11px;bottom:-11px}
 }
+
+/* ---------- v1.8 signatures & stamps */
+.annot.annimg{padding:0;white-space:normal;border:1px dashed transparent;margin:-1px;cursor:move}
+.annot.annimg img{display:block;width:100%;height:100%;pointer-events:none;-webkit-user-drag:none;user-select:none}
+.annot.annimg:hover{border-color:rgba(16,163,127,.55)}
+.annot.annimg.selected{border:1.5px solid #10a37f;box-shadow:none;margin:-1.5px}
+.ah{position:absolute;width:26px;height:26px;border-radius:50%;background:#fff;color:#10a37f;box-shadow:0 1px 4px rgba(0,0,0,.35);display:flex;align-items:center;justify-content:center;cursor:pointer;touch-action:none;z-index:2}
+.ah svg{width:15px;height:15px;stroke-width:2.4}
+.ahdel{left:-13px;top:-13px}.ahmore{right:-13px;top:-13px}.ahrs{right:-13px;bottom:-13px;cursor:nwse-resize}
+@media (hover:none) and (pointer:coarse){.ah{width:32px;height:32px}.ahdel{left:-16px;top:-16px}.ahmore{right:-16px;top:-16px}.ahrs{right:-16px;bottom:-16px}}
+.annbar .tbtn.sigbtn{color:#0b7a5f;border-color:#a7e3d1}
+.annbar .tbtn.sigbtn.active{background:#e7f8f2;border-color:#10a37f;color:#0b7a5f}
+
+.sigpanel{position:fixed;left:50%;transform:translateX(-50%);bottom:0;width:min(760px,100%);z-index:35;background:#fff;border:1px solid var(--line);border-bottom:0;border-radius:14px 14px 0 0;box-shadow:0 -8px 28px rgba(16,24,40,.18);padding:6px 12px calc(10px + env(safe-area-inset-bottom))}
+.sighead{display:flex;align-items:center;gap:6px;padding:4px 0 6px}
+.sighead b{font-size:15px}
+.sigtabs{display:flex;gap:2px}
+.sigtabs button{border:0;background:none;padding:8px 12px;font-size:15px;color:var(--muted);border-bottom:2.5px solid transparent;cursor:pointer}
+.sigtabs button.on{color:#0b7a5f;border-bottom-color:#10a37f;font-weight:600}
+.siglist{display:flex;gap:10px;overflow-x:auto;padding:4px 2px 8px;scrollbar-width:thin;-webkit-overflow-scrolling:touch}
+.sigadd,.sigitem{flex:none;width:112px;height:64px;border-radius:10px;border:1px solid var(--line);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:6px;-webkit-touch-callout:none}
+.sigadd{flex-direction:column;gap:2px;width:72px;background:#f0fbf7;border-color:#a7e3d1;color:#0b7a5f;font-size:12.5px}
+.sigadd span{width:26px;height:26px;border-radius:50%;background:#10a37f;color:#fff;font-size:20px;line-height:26px}
+.sigitem{background:#fff}
+.sigitem:hover{border-color:#10a37f;box-shadow:0 0 0 3px rgba(16,163,127,.15)}
+.sigitem img{max-width:100%;max-height:100%;pointer-events:none}
+.sighint{font-size:12.5px;color:var(--muted);padding:0 2px}
+.sigprops .sigweight{display:flex;align-items:center;gap:10px;padding:6px 2px}
+.sigweight svg{width:28px;height:28px}
+.sigweight input{flex:1;accent-color:#10a37f;height:28px}
+.sigwv{width:40px;text-align:right;font-variant-numeric:tabular-nums;color:var(--muted)}
+.sigcolors{display:flex;gap:10px;overflow-x:auto;padding:6px 2px 8px}
+.sigcolors button{flex:none;width:32px;height:32px;border-radius:50%;border:2px solid #fff;box-shadow:0 0 0 1px #c9d0db;cursor:pointer;padding:0;display:flex;align-items:center;justify-content:center;background:#fff}
+.sigcolors button.on{box-shadow:0 0 0 2.5px #10a37f}
+.sigcolors button.orig svg{width:24px;height:24px;color:#8a94a6}
+.sigall{display:flex;align-items:center;gap:8px;font-size:14px;padding:2px}
+.sigall small{color:var(--muted)}
+body.sigsheet #reader{padding-bottom:190px}
+
+.sigdraw{position:fixed;inset:0;z-index:45;background:#111827;color:#fff}
+.sigdrawbox{position:absolute;inset:0;display:flex;flex-direction:column;padding:max(10px,env(safe-area-inset-top)) 14px max(10px,env(safe-area-inset-bottom));gap:10px}
+.sigdrawbox.rot{inset:auto;left:0;top:0;transform-origin:0 0;transform:rotate(90deg) translateY(-100%);padding:12px max(14px,env(safe-area-inset-top))}
+.sigdrawhead{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.sigdrawhead b{font-size:16px}
+.sigdrawhead .tbtn{background:transparent;color:#d1d5db;border-color:#374151}
+.sigdrawhead .tbtn.primary{background:#10a37f;border-color:#10a37f;color:#fff}
+.sigpad{flex:1;position:relative;background:#fff;border-radius:12px;overflow:hidden;min-height:120px}
+.sigpad canvas{position:absolute;inset:0;width:100%;height:100%;touch-action:none;cursor:crosshair}
+.sigph{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:clamp(26px,6vmin,52px);color:#c5cad3;pointer-events:none}
+.sigline{position:absolute;left:8%;right:8%;bottom:24%;border-bottom:1.5px dashed #d5d9e0;pointer-events:none}
+.sigdrawfoot{display:flex;align-items:center;gap:8px}
+.sigdrawfoot .tbtn{background:transparent;color:#fff;border-color:#374151}
+.sigdrawhint{flex:1;text-align:center;font-size:13px;color:#9ca3af}
+.sigpens{display:flex;align-items:center;gap:6px}
+.sigpens .sep{background:#374151}
+.sigpens button{width:34px;height:34px;border-radius:8px;border:1px solid #374151;background:transparent;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0}
+.sigpens button i{display:block;width:18px;background:#fff;border-radius:3px}
+.sigpens button.on{border-color:#10a37f;background:#0f2d26}
+.sigpens button.dot{width:24px;height:24px;border-radius:50%;border:2px solid #111827;box-shadow:0 0 0 1px #4b5563}
+.sigpens button.dot.on{box-shadow:0 0 0 2.5px #10a37f}
+@media (max-width:560px){.sigdrawhint{display:none}.sigdrawbox:not(.rot) .sigdrawfoot{flex-wrap:wrap;justify-content:space-between}}
+
+.sigedit{z-index:44}
+.sigsteps{display:flex;gap:6px;padding:6px 12px;background:#0b1220;border-top:1px solid #1f2937}
+.sigsteps button{flex:1;max-width:220px;border:1px solid #374151;background:#1f2937;color:#d1d5db;border-radius:8px;padding:7px 10px;cursor:pointer}
+.sigsteps button.on{background:#10a37f;border-color:#10a37f;color:#fff}
+.sigstage{flex:1;position:relative;overflow:hidden;min-height:0;touch-action:none;background:#111827}
+.sigwrap{position:absolute;left:0;top:0;transform-origin:0 0}
+.sigwrap canvas{display:block;image-rendering:auto}
+.sigwrap canvas.checker{background-color:#fff;background-image:linear-gradient(45deg,#d9dde3 25%,transparent 25%),linear-gradient(-45deg,#d9dde3 25%,transparent 25%),linear-gradient(45deg,transparent 75%,#d9dde3 75%),linear-gradient(-45deg,transparent 75%,#d9dde3 75%);background-size:16px 16px;background-position:0 0,0 8px,8px -8px,-8px 0}
+.sigstage[data-tool=erase] {cursor:none}
+.sigedit[data-step=crop] .sigstage{cursor:crosshair}
+.sigstage[data-tool=pick]{cursor:pointer}
+.sigcrop{position:absolute;border:2px solid #34d399;box-shadow:0 0 0 9999px rgba(0,0,0,.5);cursor:move}
+.sigcrop .sch{position:absolute;width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:4px;background:#34d399;border:2px solid #064e3b}
+.sch[data-h=nw]{left:0;top:0;cursor:nwse-resize}.sch[data-h=n]{left:50%;top:0;cursor:ns-resize;width:30px;height:12px;margin:-6px 0 0 -15px}
+.sch[data-h=ne]{left:100%;top:0;cursor:nesw-resize}.sch[data-h=e]{left:100%;top:50%;cursor:ew-resize;width:12px;height:30px;margin:-15px 0 0 -6px}
+.sch[data-h=se]{left:100%;top:100%;cursor:nwse-resize}.sch[data-h=s]{left:50%;top:100%;cursor:ns-resize;width:30px;height:12px;margin:-6px 0 0 -15px}
+.sch[data-h=sw]{left:0;top:100%;cursor:nesw-resize}.sch[data-h=w]{left:0;top:50%;cursor:ew-resize;width:12px;height:30px;margin:-15px 0 0 -6px}
+@media (hover:none) and (pointer:coarse){.sigcrop .sch{width:30px;height:30px;margin:-15px 0 0 -15px}}
+.sigedit .iebar .tbtn span{display:inline!important}
+@media (max-width:760px){.sigedit .iebar{flex-wrap:wrap}.sigedit .iebar .iegap{display:none}}
+
+/* ---------- v1.9 OCR */
+.busybox .ocrcancel{margin-top:12px}

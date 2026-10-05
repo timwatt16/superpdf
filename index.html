@@ -66,6 +66,9 @@
     <symbol id="i-chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></symbol>
     <symbol id="i-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
     <symbol id="i-selall" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2" stroke-dasharray="3 2.5"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-sign" viewBox="0 0 24 24"><path d="M3 17c2.5-3 4-7 5.5-7S8 16 10 16s2.5-5 4-5-0.5 4 1 4 2-2 3-2"/><path d="M3 21h18"/></symbol>
+    <symbol id="i-stamp" viewBox="0 0 24 24"><path d="M9 13V9a3 3 0 1 1 6 0v4"/><path d="M5 13h14v4H5zM4 21h16"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M3 10h18M8 3v4M16 3v4"/></symbol>
   </defs>
 </svg>
 
@@ -117,6 +120,7 @@
 <nav id="tabbar" class="tabbar"><div id="tabs" class="tabs"></div><button id="btnNewTab" class="newtab" title="แท็บใหม่ (Ctrl+T)"><svg><use href="#i-plus"/></svg></button></nav>
 <div id="annbar" class="annbar hidden">
   <button id="annTool" class="tbtn" title="เพิ่มข้อความ: คลิกบนหน้าเพื่อวางกล่องข้อความ (T)"><svg><use href="#i-type"/></svg><span>เพิ่มข้อความ</span></button>
+  <button id="annSig" class="tbtn sigbtn" title="ลายเซ็น / ตราประทับ (S)"><svg><use href="#i-sign"/></svg><span>ลายเซ็น / ตรา</span></button>
   <span class="sep"></span>
   <select id="annFont" class="annsel" title="แบบอักษร"></select>
   <div class="sizebox"><button id="annSizeDn" class="tbtn icon" title="ลดขนาด">−</button><input id="annSize" type="number" min="4" max="300" value="16" title="ขนาดตัวอักษร (pt)"><button id="annSizeUp" class="tbtn icon" title="เพิ่มขนาด">+</button></div>
@@ -275,6 +279,95 @@
     <button id="ieDoneBtn" class="tbtn" title="วางลง/เลิกเลือก (Enter)"><svg><use href="#i-check"/></svg><span>เสร็จ</span></button>
   </div>
   <div class="iefoot"><span id="ieHint" class="scanhint"></span></div>
+</div>
+<input id="sigCam" type="file" accept="image/*" capture="environment" hidden>
+<input id="sigPick" type="file" accept="image/*" hidden>
+<input id="sigImportFile" type="file" accept=".json,application/json" hidden>
+
+<div id="sigPanel" class="sigpanel hidden">
+  <div class="sighead">
+    <div class="sigtabs"><button data-k="sig" class="on">ลายเซ็น</button><button data-k="stamp">ตราประทับ</button></div>
+    <span class="spacer"></span>
+    <button id="sigMenuBtn" class="tbtn icon" title="ส่งออก / นำเข้าคลัง"><svg><use href="#i-more"/></svg></button>
+    <button id="sigPanelClose" class="tbtn icon" title="ปิด"><svg><use href="#i-x"/></svg></button>
+  </div>
+  <div id="sigList" class="siglist"></div>
+  <div id="sigHint" class="sighint"></div>
+</div>
+
+<div id="sigProps" class="sigpanel sigprops hidden">
+  <div class="sighead"><b>แก้ไข</b><span class="spacer"></span><button id="sigPropsOk" class="tbtn primary">ตกลง</button></div>
+  <div class="sigweight" title="ความหนาของเส้น">
+    <svg viewBox="0 0 24 24" style="stroke-width:1"><path d="M3 16c3-8 5-8 6-4s3 5 5 0 4-4 7 0"/></svg>
+    <input id="sigWeight" type="range" min="-2" max="2" step="0.1" value="0">
+    <svg viewBox="0 0 24 24" style="stroke-width:3"><path d="M3 16c3-8 5-8 6-4s3 5 5 0 4-4 7 0"/></svg>
+    <span id="sigWeightVal" class="sigwv">0.0</span>
+  </div>
+  <div id="sigColors" class="sigcolors"></div>
+  <label class="sigall"><input type="checkbox" id="sigAll"> ปรับใช้กับทั้งหมด <small>(ทุกชิ้นประเภทเดียวกันในเอกสารนี้)</small></label>
+</div>
+
+<div id="sigDraw" class="sigdraw sigfull hidden">
+  <div id="sigDrawBox" class="sigdrawbox">
+    <div class="sigdrawhead">
+      <button id="sigDrawCancel" class="tbtn">ยกเลิก</button>
+      <b id="sigDrawTitle">สร้างลายเซ็น</b>
+      <button id="sigDrawOk" class="tbtn primary" disabled>เสร็จแล้ว</button>
+    </div>
+    <div class="sigpad"><canvas id="sigPad"></canvas><div id="sigPadPh" class="sigph">ลงชื่อที่นี่</div><div class="sigline"></div></div>
+    <div class="sigdrawfoot">
+      <span id="sigDrawPens" class="sigpens">
+        <button data-w="2.2" title="เส้นบาง"><i style="height:2px"></i></button><button data-w="3.2" class="on" title="เส้นกลาง"><i style="height:3.5px"></i></button><button data-w="5" title="เส้นหนา"><i style="height:5.5px"></i></button>
+        <span class="sep"></span>
+        <button data-c="#111111" class="on dot" style="background:#111" title="ดำ"></button><button data-c="#1435c8" class="dot" style="background:#1435c8" title="น้ำเงิน"></button><button data-c="#d92d20" class="dot" style="background:#d92d20" title="แดง"></button>
+      </span>
+      <span class="sigdrawhint">กรุณาเซ็นชื่อของคุณให้ชัดเจน</span>
+      <button id="sigDrawUndo" class="tbtn icon" title="ย้อนกลับ (Ctrl+Z)"><svg><use href="#i-undo"/></svg></button>
+      <button id="sigDrawRedo" class="tbtn icon" title="ทำซ้ำ (Ctrl+Y)"><svg><use href="#i-redo"/></svg></button>
+      <button id="sigDrawClear" class="tbtn icon" title="ล้างทั้งหมด"><svg><use href="#i-trash"/></svg></button>
+    </div>
+  </div>
+</div>
+
+<div id="sigEd" class="scanner sigfull sigedit hidden" data-step="crop">
+  <div class="scanhead">
+    <button id="sigEdClose" class="tbtn icon" title="ยกเลิก (Esc)"><svg><use href="#i-x"/></svg></button>
+    <div class="scantitle"><b id="sigEdTitle">เพิ่มลายเซ็น</b><span id="sigEdStep"></span></div>
+    <button id="sigEdUndo" class="tbtn icon" title="เลิกทำ (Ctrl+Z)"><svg><use href="#i-undo"/></svg></button>
+    <button id="sigEdRedo" class="tbtn icon" title="ทำซ้ำ (Ctrl+Y)"><svg><use href="#i-redo"/></svg></button>
+    <button id="sigEdOk" class="tbtn primary"><svg><use href="#i-check"/></svg><span id="sigEdOkLbl">ถัดไป</span></button>
+  </div>
+  <div class="sigsteps"><button data-s="crop" class="on">1 · ตัดกรอบ</button><button data-s="clean">2 · ลบส่วนเกิน</button></div>
+  <div id="sigEdStage" class="sigstage" data-tool="erase">
+    <div id="sigEdWrap" class="sigwrap"><canvas id="sigEdCanvas"></canvas></div>
+    <div id="sigCropBox" class="sigcrop"><i class="sch" data-h="nw"></i><i class="sch" data-h="n"></i><i class="sch" data-h="ne"></i><i class="sch" data-h="e"></i><i class="sch" data-h="se"></i><i class="sch" data-h="s"></i><i class="sch" data-h="sw"></i><i class="sch" data-h="w"></i></div>
+    <div id="sigEdRect" class="ierect hidden"></div>
+    <div id="sigEdCursor" class="iecursor hidden"></div>
+  </div>
+  <div id="sigEdCropBar" class="scanbar">
+    <button id="sigEdRot" class="tbtn"><svg><use href="#i-rl"/></svg><span>หมุนซ้าย</span></button>
+    <button id="sigEdAuto" class="tbtn"><span>หากรอบอัตโนมัติ</span></button>
+    <button id="sigEdFull" class="tbtn"><span>ใช้ทั้งภาพ</span></button>
+    <span class="scanhint">ลากมุม/ขอบเพื่อปรับกรอบ · ลากในกรอบเพื่อย้าย</span>
+  </div>
+  <div id="sigEdCleanBar" class="iebar hidden">
+    <div class="ietools">
+      <button data-t="erase" class="tbtn active" title="ยางลบ (E)"><svg><use href="#i-erase"/></svg><span>ยางลบ</span></button>
+      <button data-t="pick" class="tbtn" title="แตะลบทั้งชิ้น / ลากกรอบลบ (V)"><svg><use href="#i-pointer"/></svg><span>แตะลบทั้งชิ้น</span></button>
+    </div>
+    <label class="ieslider"><span id="sigEdSizeLbl">ขนาดยางลบ</span> <input id="sigEdSize" type="range" min="4" max="140" value="28"></label>
+    <label id="sigEdThrWrap" class="ieslider" title="มากขึ้น = เก็บเส้นจาง ๆ ไว้มากขึ้น · น้อยลง = ตัดพื้นกระดาษ/เงาออกมากขึ้น">เก็บเส้นจาง <input id="sigEdThr" type="range" min="0" max="100" value="50"></label>
+    <button id="sigEdSpeck" class="tbtn" title="ลบจุดเล็ก ๆ ที่อยู่โดด ๆ"><svg><use href="#i-clean"/></svg><span>ลบจุดสกปรก</span></button>
+    <button id="sigEdReset" class="tbtn" title="ยกเลิกการลบทั้งหมด"><svg><use href="#i-undo"/></svg><span>คืนค่า</span></button>
+    <span class="iegap"></span>
+    <div class="iegroup">
+      <button id="sigEdZoomOut" class="tbtn icon" title="ย่อ (Ctrl+-)"><svg><use href="#i-zout"/></svg></button>
+      <span id="sigEdZoomLbl" class="zoomlabel">100%</span>
+      <button id="sigEdZoomIn" class="tbtn icon" title="ขยาย (Ctrl++)"><svg><use href="#i-zin"/></svg></button>
+      <button id="sigEdZoomFit" class="tbtn icon" title="พอดีหน้าจอ (Ctrl+0)"><svg><use href="#i-fit"/></svg></button>
+    </div>
+  </div>
+  <div class="iefoot"><span id="sigEdHint" class="scanhint"></span></div>
 </div>
 <div id="printArea" class="printarea"></div>
 
