@@ -1,4 +1,4 @@
-// Super PDF v1.9.5 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9.6 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
@@ -16,7 +16,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 // ------------------------------------------------------------------ state
 const sources = new Map();   // id -> { id, name, bytes, pdf (pdfjs doc), password, blank }
 const docs = [];             // tabs: { id, name, pages:[{uid,src,index,rot}], selected:Set, lastClicked, undo:[], redo:[], dirty, scroll:{} }
-const APP_VERSION = '1.9.5';   // shown at the top-left (#appVer) — change here and in index.html when releasing
+const APP_VERSION = '1.9.6';   // shown at the top-left (#appVer) — change here and in index.html when releasing
 let D = null;                // active doc
 let mode = 'organize';
 let host = { host: false };
@@ -106,7 +106,7 @@ function toast(msg, kind = '', actions = [], ms = 5000) {
 }
 
 // generic dialog: returns { btn, values } ; btn = value of pressed button or null (cancel)
-function dialog({ title, body = '', buttons = [['cancel', 'ยกเลิก'], ['ok', 'ตกลง', true]], focus }) {
+function dialog({ title, body = '', buttons = [['cancel', 'ยกเลิก'], ['ok', 'ตกลง', true]], focus, onOpen }) {
   return new Promise((resolve) => {
     $('modalTitle').textContent = title;
     $('modalBody').innerHTML = body;
@@ -135,6 +135,7 @@ function dialog({ title, body = '', buttons = [['cancel', 'ยกเลิก'],
     };
     document.addEventListener('keydown', onKey, true);
     $('modal').classList.remove('hidden');
+    if (onOpen) try { onOpen(); } catch {}
     setTimeout(() => { const f = focus ? form.querySelector(focus) : bb.querySelector('.primary'); f && f.focus(); }, 30);
   });
 }
@@ -1302,6 +1303,7 @@ function emptyAreaMenu() {
     { sep: true },
     { label: 'สแกนเอกสารเพิ่ม…', icon: 'scan', action: () => openScanner() },
     { label: 'สำเนาบัตร (หน้าบัตร / หน้า-หลัง)…', icon: 'card', action: () => cardCopyDialog() },
+    { label: 'สำเนาทะเบียนบ้าน (หน้าแรก + หน้าที่มีชื่อ)…', icon: 'house', action: () => houseCopyDialog() },
     { label: 'พิมพ์…', icon: 'print', kbd: 'Ctrl+P', action: () => printDialog() },
     { label: 'บันทึก…', icon: 'save', kbd: 'Ctrl+S', action: () => saveAll() },
     { label: 'บันทึกเป็นไฟล์ใหม่…', icon: 'extract', kbd: 'Ctrl+Shift+S', action: () => saveAll(true) },
@@ -2261,11 +2263,9 @@ try { const s = JSON.parse(localStorage.getItem('superpdf.scan') || '{}'); if (s
 function openScanner(opts = {}) {
   scan.queue = []; scan.cur = null; scan.pages = []; scan.replace = opts.replace || null;
   scan.card = opts.card || null;
-  if (scan.card) { scan.prevFilter = scan.filter; scan.filter = scan.card.filter || 'orig'; }
-  $('scanTitle').textContent = scan.card ? 'สำเนาบัตร' : 'สแกนเอกสาร';
-  $('scanEmptyMsg').innerHTML = scan.card
-    ? `ถ่ายรูป หรือเลือกรูป <b>${scan.card.sides === 2 ? 'หน้าบัตร แล้วตามด้วยหลังบัตร' : 'หน้าบัตร'}</b><br><small>วางบัตรบนพื้นสีเข้ม ระบบจะหาขอบบัตร ดึงให้ตรง แล้ววางบน A4 ${scan.card.scale > 1 ? 'แบบขยาย' : 'ขนาดจริง'}</small>`
-    : 'ถ่ายรูปเอกสาร หรือเลือกรูปที่ถ่ายไว้<br><small>ระบบจะหาขอบกระดาษ ดึงให้ตรง และปรับให้เหมือนถ่ายเอกสาร</small>';
+  if (scan.card) { scan.prevFilter = scan.filter; scan.filter = scan.card.filter || (scan.card.kind === 'house' ? 'bw' : 'orig'); }
+  $('scanTitle').textContent = scan.card ? copyTitle(scan.card) : 'สแกนเอกสาร';
+  $('scanEmptyMsg').innerHTML = scan.card ? copyStepMsg(scan.card, 0) : 'ถ่ายรูปเอกสาร หรือเลือกรูปที่ถ่ายไว้<br><small>ระบบจะหาขอบกระดาษ ดึงให้ตรง และปรับให้เหมือนถ่ายเอกสาร</small>';
   $('scanCardLink').classList.toggle('hidden', !!(scan.card || scan.replace));
   $('scanner').classList.remove('hidden');
   $('scanDoneLbl').textContent = scan.replace ? 'แทนที่หน้าเดิม' : 'เสร็จ';
@@ -2287,11 +2287,11 @@ function showScanStep(step) {
   $('scanFilterBar').classList.toggle('hidden', step !== 'filter');
   const n = scan.pages.length;
   if (scan.card) {
-    const side = n === 0 ? 'หน้าบัตร' : 'หลังบัตร', tot = scan.card.sides;
-    $('scanStep').textContent = `${side}${tot === 2 ? ` (${Math.min(n + 1, 2)}/2)` : ''}` + (step === 'crop' ? ' · ครอปให้พอดีบัตร' : step === 'filter' ? ' · ปรับภาพ' : '');
+    const L = copyLabels(scan.card), tot = L.length, k = Math.min(n, tot - 1);
+    $('scanStep').textContent = `${L[k]}${tot > 1 ? ` (${k + 1}/${tot})` : ''}` + (step === 'crop' ? ' · ครอปให้พอดีขอบ' : step === 'filter' ? ' · ปรับภาพ' : '');
     $('scanDone').disabled = !n;
     $('scanDoneLbl').textContent = 'สร้างสำเนา';
-    if (step === 'empty' && n) $('scanEmptyMsg').innerHTML = `ถ่ายรูป หรือเลือกรูป <b>หลังบัตร</b><br><small>หรือกด “สร้างสำเนา” เพื่อใช้เฉพาะหน้าบัตร</small>`;
+    if (step === 'empty' && n) $('scanEmptyMsg').innerHTML = copyStepMsg(scan.card, n);
     return;
   }
   $('scanStep').textContent = step === 'crop' ? 'ขั้นที่ 1: ครอปและดึงให้ตรง' : step === 'filter' ? 'ขั้นที่ 2: ปรับภาพ' : (n ? `สแกนแล้ว ${n} หน้า` : '');
@@ -2370,7 +2370,7 @@ async function finishCrop() {
       out = r.output;
     }
     c.flat = normalizeSize(out);
-    if (scan.card && c.flat.height > c.flat.width * 1.15 && !c.rot) c.rot = 270; // cards are landscape
+    if (scan.card && c.flat.height > c.flat.width * 1.15 && !c.rot) c.rot = 270; // cards / house-registration pages are landscape
   } catch (e) { unbusy(); toast('ดึงภาพไม่สำเร็จ: ' + e.message, 'err'); return; }
   unbusy();
   showScanStep('filter');
@@ -2587,12 +2587,30 @@ async function finishScan() {
   await insertOrOpen([{ name: 'สแกน_' + stamp + '.pdf', bytes }], insertionIndex());
   toast(`เพิ่มหน้าสแกน ${n} หน้าแล้ว`, 'ok', [], 2500);
 }
-// ------------------------------------------------------------------ v1.9.5 ID-card copy (สำเนาบัตร)
-// Front only (default — safer: the back of a Thai ID card carries the laser code) or front + back,
-// cropped with the scanner, then placed on one A4 page at real size (85.6 × 54 mm) or enlarged.
+// ------------------------------------------------------------------ v1.9.5/1.9.6 copies on one A4: ID card, house registration
+// Card: front only (default — safer: the back of a Thai ID card carries the laser code) or front + back, at real size
+// 85.6 × 54 mm or enlarged. House registration (ทะเบียนบ้าน ท.ร.14): the house page + the page(s) with the person's
+// name, each ~15 cm wide (aspect ratio kept from the photo), stacked on one A4 like a photocopy.
 const CARD_MM = [85.6, 54];
-let cardOpts = { sides: 1, scale: 1, note: '' };
-try { Object.assign(cardOpts, JSON.parse(localStorage.getItem('superpdf.card') || '{}')); } catch {}
+const HOUSE_LABELS = ['หน้าแรก (รายการเกี่ยวกับบ้าน)', 'หน้าที่มีชื่อ', 'หน้าที่มีชื่อ (คนที่ 2)'];
+const copyTitle = (o) => (o.kind === 'house' ? 'สำเนาทะเบียนบ้าน' : 'สำเนาบัตร');
+const copyLabels = (o) => (o.kind === 'house' ? HOUSE_LABELS.slice(0, o.sides) : ['หน้าบัตร', 'หลังบัตร'].slice(0, o.sides));
+function copyStepMsg(o, n) {
+  const L = copyLabels(o);
+  if (o.kind === 'house') {
+    return n === 0
+      ? `ถ่ายรูป หรือเลือกรูป <b>${L[0]}</b>${L.length > 1 ? ` แล้วตามด้วย <b>${L.slice(1).join(' และ ')}</b>` : ''}<br><small>กางเล่มให้แบน ถ่ายทีละหน้า ระบบจะหาขอบ ดึงให้ตรง แล้ววางเรียงบน A4 แผ่นเดียว</small>`
+      : `ถ่ายรูป หรือเลือกรูป <b>${L[Math.min(n, L.length - 1)]}</b><br><small>หรือกด “สร้างสำเนา” เพื่อใช้เท่าที่ถ่ายไว้</small>`;
+  }
+  return n === 0
+    ? `ถ่ายรูป หรือเลือกรูป <b>${o.sides === 2 ? 'หน้าบัตร แล้วตามด้วยหลังบัตร' : 'หน้าบัตร'}</b><br><small>วางบัตรบนพื้นสีเข้ม ระบบจะหาขอบบัตร ดึงให้ตรง แล้ววางบน A4 ${o.scale > 1 ? 'แบบขยาย' : 'ขนาดจริง'}</small>`
+    : `ถ่ายรูป หรือเลือกรูป <b>หลังบัตร</b><br><small>หรือกด “สร้างสำเนา” เพื่อใช้เฉพาะหน้าบัตร</small>`;
+}
+const loadOpts = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k) || '{}')); } catch { return d; } };
+const saveOpts = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} };
+let cardOpts = loadOpts('superpdf.card', { kind: 'card', sides: 1, scale: 1, note: '' });
+let houseOpts = loadOpts('superpdf.house', { kind: 'house', sides: 2, scale: 1, note: '' });
+cardOpts.kind = 'card'; houseOpts.kind = 'house';
 async function cardCopyDialog() {
   const o = cardOpts;
   const r = await dialog({
@@ -2601,60 +2619,100 @@ async function cardCopyDialog() {
       <label class="opt"><input type="radio" name="sides" value="1" ${o.sides !== 2 ? 'checked' : ''}><span><b>เฉพาะหน้าบัตร</b><small>แนะนำ — หลังบัตรประชาชนมีรหัสกำกับ (Laser code) ที่ไม่ควรเปิดเผย</small></span></label>
       <label class="opt"><input type="radio" name="sides" value="2" ${o.sides === 2 ? 'checked' : ''}><span><b>หน้าและหลังบัตร</b><small>วางหน้าบัตรด้านบน หลังบัตรด้านล่าง ในแผ่นเดียว</small></span></label>
       <div class="field"><label>ขนาดบนกระดาษ A4</label><select name="scale"><option value="1" ${o.scale == 1 ? 'selected' : ''}>ขนาดจริง (8.6 × 5.4 ซม.)</option><option value="1.5" ${o.scale == 1.5 ? 'selected' : ''}>ขยาย 1.5 เท่า (อ่านง่าย)</option><option value="2" ${o.scale == 2 ? 'selected' : ''}>ขยาย 2 เท่า</option></select></div>
-      <div class="field"><label>ข้อความใต้บัตร (ไม่บังคับ)</label><input name="note" type="text" value="${esc(o.note || '')}" placeholder="เช่น ใช้สำหรับยื่นขอสินเชื่อเท่านั้น"></div>`,
+      <div class="field"><label>ข้อความใต้บัตร (ไม่บังคับ)</label><input name="note" type="text" value="${esc(o.note || '')}" placeholder="เช่น ใช้สำหรับยื่นขอสินเชื่อเท่านั้น"></div>
+      <p class="hint">ต้องการสำเนาทะเบียนบ้าน? <button type="button" class="linkbtn" id="toHouse">ทำสำเนาทะเบียนบ้าน</button></p>`,
     buttons: [['cancel', 'ยกเลิก'], ['ok', 'ถ่าย / เลือกรูปบัตร', true]],
+    onOpen: () => { const b = $('toHouse'); if (b) b.onclick = () => { $('modalBtns').querySelector('button').click(); setTimeout(houseCopyDialog, 50); }; },
   });
   if (!r.btn) return;
-  cardOpts = { sides: r.values.sides === '2' ? 2 : 1, scale: +r.values.scale || 1, note: (r.values.note || '').trim(), filter: cardOpts.filter };
-  try { localStorage.setItem('superpdf.card', JSON.stringify(cardOpts)); } catch {}
+  cardOpts = { ...cardOpts, sides: r.values.sides === '2' ? 2 : 1, scale: +r.values.scale || 1, note: (r.values.note || '').trim() };
+  saveOpts('superpdf.card', cardOpts);
   openScanner({ card: { ...cardOpts } });
 }
-// accepted card pictures -> one A4 canvas (200 dpi)
-function composeCardPage(pages, opts) {
+async function houseCopyDialog() {
+  const o = houseOpts;
+  const r = await dialog({
+    title: 'สำเนาทะเบียนบ้าน',
+    body: `<div class="field"><label>หน้าที่จะสำเนา (วางเรียงบน A4 แผ่นเดียว)</label></div>
+      <label class="opt"><input type="radio" name="sides" value="2" ${o.sides !== 3 && o.sides !== 1 ? 'checked' : ''}><span><b>หน้าแรก + หน้าที่มีชื่อ</b><small>แบบที่นิยม — รายการเกี่ยวกับบ้าน (ด้านบน) และรายการบุคคลที่มีชื่อเจ้าตัว (ด้านล่าง)</small></span></label>
+      <label class="opt"><input type="radio" name="sides" value="3" ${o.sides === 3 ? 'checked' : ''}><span><b>หน้าแรก + หน้าที่มีชื่อ 2 คน</b><small>เช่น ผู้กู้และผู้กู้ร่วมอยู่บ้านเดียวกัน (3 หน้าในแผ่นเดียว)</small></span></label>
+      <label class="opt"><input type="radio" name="sides" value="1" ${o.sides === 1 ? 'checked' : ''}><span><b>หน้าเดียว</b><small>เฉพาะหน้าที่ถ่าย 1 หน้า</small></span></label>
+      <div class="field"><label>ขนาดแต่ละหน้า</label><select name="scale"><option value="1" ${o.scale == 1 ? 'selected' : ''}>ใกล้เคียงขนาดจริง (กว้าง ~15 ซม.)</option><option value="1.2" ${o.scale == 1.2 ? 'selected' : ''}>ใหญ่ขึ้น (กว้าง ~18 ซม.)</option></select></div>
+      <div class="field"><label>ข้อความท้ายแผ่น (ไม่บังคับ)</label><input name="note" type="text" value="${esc(o.note || '')}" placeholder="เช่น ใช้สำหรับยื่นขอสินเชื่อเท่านั้น"></div>`,
+    buttons: [['cancel', 'ยกเลิก'], ['ok', 'ถ่าย / เลือกรูปทะเบียนบ้าน', true]],
+  });
+  if (!r.btn) return;
+  houseOpts = { ...houseOpts, sides: +r.values.sides || 2, scale: +r.values.scale || 1, note: (r.values.note || '').trim() };
+  saveOpts('superpdf.house', houseOpts);
+  openScanner({ card: { ...houseOpts } });
+}
+// accepted pictures -> one A4 canvas (200 dpi)
+function composeCopyPage(pages, opts) {
   const DPI = 200, mm = DPI / 25.4, W = Math.round(210 * mm), H = Math.round(297 * mm);
   const c = document.createElement('canvas'); c.width = W; c.height = H;
   const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, W, H);
-  const cw = CARD_MM[0] * opts.scale * mm, ch = CARD_MM[1] * opts.scale * mm, gap = 14 * mm, r = 3.2 * opts.scale * mm;
-  const total = pages.length * ch + (pages.length - 1) * gap;
-  let y = Math.max(25 * mm, Math.min(45 * mm, (H - total) / 2 - 40 * mm));
-  const x = (W - cw) / 2;
   g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
-  for (const p of pages) {
-    g.save();
-    g.beginPath(); g.roundRect ? g.roundRect(x, y, cw, ch, r) : g.rect(x, y, cw, ch); g.clip();
-    g.drawImage(p.canvas, x, y, cw, ch);
-    g.restore();
-    g.lineWidth = Math.max(2, 0.25 * mm); g.strokeStyle = '#444';
-    g.beginPath(); g.roundRect ? g.roundRect(x, y, cw, ch, r) : g.rect(x, y, cw, ch); g.stroke();
-    y += ch + gap;
+  const noteH = opts.note ? 14 * mm : 0;
+  let lastBottom = 0;
+  if (opts.kind === 'house') {
+    // each page ~152 mm wide (×scale), aspect from the photo; equal bands down the page, shrink if they do not fit
+    const top = 15 * mm, bottom = H - 15 * mm - noteH, gapMin = 8 * mm;
+    let ws = pages.map(() => 152 * opts.scale * mm), hs = pages.map((p, i) => ws[i] * p.canvas.height / p.canvas.width);
+    const need = hs.reduce((a, b) => a + b, 0) + gapMin * (pages.length - 1);
+    if (need > bottom - top) { const k = (bottom - top - gapMin * (pages.length - 1)) / hs.reduce((a, b) => a + b, 0); ws = ws.map((w) => w * k); hs = hs.map((h) => h * k); }
+    const band = (bottom - top) / pages.length;
+    pages.forEach((p, i) => {
+      const x = (W - ws[i]) / 2, y = top + band * i + Math.max(0, (band - hs[i]) / 2);
+      g.drawImage(p.canvas, x, y, ws[i], hs[i]);
+      g.lineWidth = Math.max(2, 0.2 * mm); g.strokeStyle = '#555'; g.strokeRect(x, y, ws[i], hs[i]);
+      lastBottom = y + hs[i];
+    });
+  } else {
+    const cw = CARD_MM[0] * opts.scale * mm, ch = CARD_MM[1] * opts.scale * mm, gap = 14 * mm, r = 3.2 * opts.scale * mm;
+    const total = pages.length * ch + (pages.length - 1) * gap;
+    let y = Math.max(25 * mm, Math.min(45 * mm, (H - total) / 2 - 40 * mm));
+    const x = (W - cw) / 2;
+    for (const p of pages) {
+      g.save();
+      g.beginPath(); g.roundRect ? g.roundRect(x, y, cw, ch, r) : g.rect(x, y, cw, ch); g.clip();
+      g.drawImage(p.canvas, x, y, cw, ch);
+      g.restore();
+      g.lineWidth = Math.max(2, 0.25 * mm); g.strokeStyle = '#444';
+      g.beginPath(); g.roundRect ? g.roundRect(x, y, cw, ch, r) : g.rect(x, y, cw, ch); g.stroke();
+      lastBottom = y + ch; y += ch + gap;
+    }
   }
   if (opts.note) {
     g.fillStyle = '#000'; g.textAlign = 'center'; g.textBaseline = 'top';
     g.font = `bold ${Math.round(18 / 72 * DPI)}px "TH Sarabun New", "Leelawadee UI", Tahoma, sans-serif`;
-    g.fillText(opts.note, W / 2, y - gap + 8 * mm, W - 30 * mm);
+    g.fillText(opts.note, W / 2, opts.kind === 'house' ? H - 15 * mm - noteH + 3 * mm : lastBottom + 6 * mm, W - 30 * mm);
   }
   return c;
 }
+const composeCardPage = (pages, opts) => composeCopyPage(pages, { kind: 'card', ...opts });
 async function finishCardCopy() {
   const opts = scan.card, pages = scan.pages.slice(0, opts.sides);
-  busy('กำลังสร้างสำเนาบัตร …');
+  busy(`กำลังสร้าง${copyTitle(opts)} …`);
   let bytes;
   try {
     await bundledFontsReady;
-    const cv = composeCardPage(pages, opts);
+    const cv = composeCopyPage(pages, opts);
     const bw = pages.every((p) => p.filter === 'bw');
     bytes = await scanPagesToPdf([{ canvas: cv, filter: bw ? 'bw' : 'orig', wPt: 595.28, hPt: 841.89 }]);
-    cardOpts.filter = scan.filter; try { localStorage.setItem('superpdf.card', JSON.stringify(cardOpts)); } catch {}
-  } catch (e) { unbusy(); toast('สร้างสำเนาบัตรไม่สำเร็จ: ' + e.message, 'err', [], 9000); return; }
+    if (opts.kind === 'house') { houseOpts.filter = scan.filter; saveOpts('superpdf.house', houseOpts); }
+    else { cardOpts.filter = scan.filter; saveOpts('superpdf.card', cardOpts); }
+  } catch (e) { unbusy(); toast(`สร้าง${copyTitle(opts)}ไม่สำเร็จ: ` + e.message, 'err', [], 9000); return; }
   unbusy();
   const now = new Date(), stamp = `${now.getFullYear()}${pad(now.getMonth() + 1, 2)}${pad(now.getDate(), 2)}_${pad(now.getHours(), 2)}${pad(now.getMinutes(), 2)}`;
   const n = pages.length;
   closeScanner();
-  await insertOrOpen([{ name: 'สำเนาบัตร_' + stamp + '.pdf', bytes }], insertionIndex());
-  toast(`สร้างสำเนาบัตร (${n === 2 ? 'หน้า-หลัง' : 'หน้าบัตร'}) แล้ว`, 'ok', [], 3000);
+  await insertOrOpen([{ name: copyTitle(opts) + '_' + stamp + '.pdf', bytes }], insertionIndex());
+  toast(opts.kind === 'house' ? `สร้างสำเนาทะเบียนบ้าน (${n} หน้าในแผ่นเดียว) แล้ว` : `สร้างสำเนาบัตร (${n === 2 ? 'หน้า-หลัง' : 'หน้าบัตร'}) แล้ว`, 'ok', [], 3000);
 }
 $('btnCardPick').onclick = (e) => { e.stopPropagation(); cardCopyDialog(); };
+$('btnHousePick').onclick = (e) => { e.stopPropagation(); houseCopyDialog(); };
 $('scanCardBtn').onclick = () => { if (scan.pages.length) return; closeScanner(); cardCopyDialog(); };
+$('scanHouseBtn').onclick = () => { if (scan.pages.length) return; closeScanner(); houseCopyDialog(); };
 
 // enhance existing pages (render → filter screen, no crop by default)
 async function enhancePages(list) {
@@ -5332,7 +5390,7 @@ async function convertScanWord() {
 
 
 // expose for automated testing
-window.__superpdf = { cardCopyDialog, composeCardPage, get scanState() { return scan; }, acceptScanPage, finishCrop, pasteAny, readPasteEvent, sniffExt, isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
+window.__superpdf = { cardCopyDialog, houseCopyDialog, composeCopyPage, composeCardPage, get scanState() { return scan; }, acceptScanPage, finishCrop, pasteAny, readPasteEvent, sniffExt, isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';

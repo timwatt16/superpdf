@@ -463,3 +463,6 @@ body.sigsheet #reader{padding-bottom:190px}
 
 /* ---------- v1.9 OCR */
 .busybox .ocrcancel{margin-top:12px}
+
+/* v1.9.6: two copy buttons side by side on the start screen */
+.copybtns{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
