@@ -1,11 +1,11 @@
-// Super PDF v1.9.2 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9.3 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
 
 const $ = (id) => document.getElementById(id);
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
-const IMG_EXT = ['jpg', 'jpeg', 'jfif', 'png', 'gif', 'bmp', 'webp'];
+const IMG_EXT = ['jpg', 'jpeg', 'jfif', 'png', 'gif', 'bmp', 'webp', 'heic', 'heif'];
 const TIFF_EXT = ['tif', 'tiff', 'mtiff'];
 const WORD_EXT = ['doc', 'docx', 'docm', 'rtf', 'odt', 'txt', 'htm', 'html', 'xml', 'wpd', 'dot', 'dotx'];
 const EXCEL_EXT = ['xls', 'xlsx', 'xlsm', 'xlsb', 'csv', 'ods'];
@@ -16,7 +16,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 // ------------------------------------------------------------------ state
 const sources = new Map();   // id -> { id, name, bytes, pdf (pdfjs doc), password, blank }
 const docs = [];             // tabs: { id, name, pages:[{uid,src,index,rot}], selected:Set, lastClicked, undo:[], redo:[], dirty, scroll:{} }
-const APP_VERSION = '1.9.2';   // shown at the top-left (#appVer) — change here and in index.html when releasing
+const APP_VERSION = '1.9.3';   // shown at the top-left (#appVer) — change here and in index.html when releasing
 let D = null;                // active doc
 let mode = 'organize';
 let host = { host: false };
@@ -217,7 +217,45 @@ async function openPdfSource(name, bytes) {
   }
 }
 
-function loadImageEl(blob) {
+// v1.9.3: iPhone photos (.heic/.heif). Edge on Windows cannot show them, so they are decoded with libheif
+// (web/heic/libheif-bundle.js, ~2 MB, loaded only the first time a HEIC picture is opened).
+async function isHeic(blob) {
+  const b = new Uint8Array(await blob.slice(0, 16).arrayBuffer());
+  const t = String.fromCharCode(...b.slice(4, 12));
+  return t.startsWith('ftyp') && /^(heic|heix|heim|heis|hevc|hevx|mif1|msf1|avci)$/.test(t.slice(4));
+}
+let heifLib = null;
+function loadHeif() {
+  if (!heifLib) heifLib = new Promise((res, rej) => {
+    if (window.libheif) return res(window.libheif);
+    const sc = document.createElement('script');
+    sc.src = new URL('./heic/libheif-bundle.js', location.href).href;
+    sc.onload = () => (window.libheif ? res(window.libheif) : rej(new Error('โหลดตัวอ่าน HEIC ไม่สำเร็จ')));
+    sc.onerror = () => rej(new Error('โหลดตัวอ่าน HEIC ไม่สำเร็จ (ถ้าเป็น iPhone ให้เปิดเว็บขณะออนไลน์ 1 ครั้งก่อน)'));
+    document.head.appendChild(sc);
+  }).then((f) => (typeof f === 'function' ? f() : f)).catch((e) => { heifLib = null; throw e; });
+  return heifLib;
+}
+async function heicToJpegBlob(blob) {
+  const lib = await loadHeif();
+  const dec = new lib.HeifDecoder();
+  const imgs = dec.decode(new Uint8Array(await blob.arrayBuffer()));
+  if (!imgs || !imgs.length) throw new Error('อ่านไฟล์ HEIC ไม่ได้');
+  const im = imgs[0], w = im.get_width(), h = im.get_height();
+  try {
+    const id = await new Promise((res, rej) => im.display({ data: new Uint8ClampedArray(w * h * 4), width: w, height: h }, (d) => (d ? res(d) : rej(new Error('ถอดรหัสภาพ HEIC ไม่สำเร็จ')))));
+    const c = document.createElement('canvas'); c.width = w; c.height = h;
+    c.getContext('2d').putImageData(new ImageData(id.data, w, h), 0, 0);
+    const out = await canvasToBytes(c, 'image/jpeg', 0.92);
+    c.width = c.height = 0;
+    return new Blob([out], { type: 'image/jpeg' });
+  } finally { for (const x of imgs) try { x.free && x.free(); } catch {} }
+}
+async function loadImageEl(blob) {
+  try { return await loadImageElRaw(blob); }
+  catch (e) { if (await isHeic(blob).catch(() => false)) return loadImageElRaw(await heicToJpegBlob(blob)); throw e; }
+}
+function loadImageElRaw(blob) {
   return new Promise((res, rej) => {
     const url = URL.createObjectURL(blob);
     const im = new Image();
@@ -927,7 +965,7 @@ document.addEventListener('paste', async (e) => {
 // ------------------------------------------------------------------ paste from other apps
 // Sources: our own copied pages, files (PDF / images / Office) and pictures copied in other apps,
 // text (becomes a new page), or a link to a PDF / picture.
-const TYPE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/tiff': 'tiff', 'application/pdf': 'pdf' };
+const TYPE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic', 'image/heif': 'heif', 'image/tiff': 'tiff', 'application/pdf': 'pdf' };
 async function readPasteEvent(e) {
   const cd = e.clipboardData, files = [];
   let n = 0;
@@ -5153,7 +5191,7 @@ async function convertScanWord() {
 
 
 // expose for automated testing
-window.__superpdf = { compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
+window.__superpdf = { isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
