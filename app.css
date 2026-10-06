@@ -1,3 +1,8 @@
+/* v1.9.2: TH Sarabun New ฝังมากับโปรแกรม (ใช้ได้ทุกเครื่อง รวม iPhone โดยไม่ต้องติดตั้งฟอนต์) */
+@font-face{font-family:'TH Sarabun New';src:url('fonts/THSarabunNew.ttf') format('truetype');font-weight:400;font-style:normal;font-display:swap}
+@font-face{font-family:'TH Sarabun New';src:url('fonts/THSarabunNew-Bold.ttf') format('truetype');font-weight:700;font-style:normal;font-display:swap}
+@font-face{font-family:'TH Sarabun New';src:url('fonts/THSarabunNew-Italic.ttf') format('truetype');font-weight:400;font-style:italic;font-display:swap}
+@font-face{font-family:'TH Sarabun New';src:url('fonts/THSarabunNew-BoldItalic.ttf') format('truetype');font-weight:700;font-style:italic;font-display:swap}
 :root{
   --bg:#eef1f6; --panel:#ffffff; --ink:#1b2330; --muted:#667085; --line:#dde2ea;
   --accent:#1466e0; --accent-ink:#fff; --accent-soft:#e6efff; --danger:#d92d20; --danger-soft:#fdecea;
@@ -17,6 +22,7 @@ svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.8;stroke
 .brand{display:flex;align-items:center;gap:8px;font-size:17px;margin-right:6px;white-space:nowrap}
 .brand img{width:28px;height:28px}
 .brand b{color:var(--danger)}
+.brand .appver{font-size:11px;font-weight:600;color:var(--muted);background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:1px 6px;line-height:16px;letter-spacing:.2px}
 .tgroup{display:flex;align-items:center;gap:4px}
 .sep{width:1px;height:22px;background:var(--line);margin:0 4px}
 .spacer{flex:1}
@@ -326,6 +332,7 @@ svg.flip{transform:scaleX(-1)}
 .scanhead .tbtn span,.scanbig .tbtn span,.scanbar .tbtn span{display:inline!important}
 .modalbox input[type=radio],.modalbox input[type=checkbox]{width:auto;height:auto;flex:none}
 .modalbox .opt span{display:flex;flex-direction:column;gap:2px}
+.modalbox .opt span span{display:block}
 @media (max-width:1500px){ #btnPrint span,#btnScan span,#btnBlank span{display:none} #btnPrint,#btnScan,#btnBlank{padding:0;width:34px;justify-content:center} }
 @media (max-width:760px){ #btnPrint,#btnScan,#btnBlank{width:auto;padding:0 9px} }
 .modalbox .field>label.opt{display:flex;font-weight:400;margin-bottom:6px}

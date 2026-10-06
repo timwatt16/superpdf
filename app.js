@@ -1,4 +1,4 @@
-// Super PDF v1.9.1 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9.2 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
@@ -16,6 +16,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 // ------------------------------------------------------------------ state
 const sources = new Map();   // id -> { id, name, bytes, pdf (pdfjs doc), password, blank }
 const docs = [];             // tabs: { id, name, pages:[{uid,src,index,rot}], selected:Set, lastClicked, undo:[], redo:[], dirty, scroll:{} }
+const APP_VERSION = '1.9.2';   // shown at the top-left (#appVer) — change here and in index.html when releasing
 let D = null;                // active doc
 let mode = 'organize';
 let host = { host: false };
@@ -1143,9 +1144,12 @@ const splitMenu = () => [
   { label: 'บันทึกเป็น PDF ไฟล์เดียว…', icon: 'extract', disabled: !n(), action: () => splitToFile(false) },
   { label: 'บันทึกแยกทีละหน้า (1 หน้า = 1 ไฟล์)…', icon: 'split', disabled: !n(), action: () => splitToFile(true) },
   { label: 'แยกทุก ๆ N หน้า…', icon: 'split', disabled: !D.pages.length, action: () => splitEvery() },
+  { label: 'แบ่งตามขนาดไฟล์ (ไม่เกิน … MB)…', icon: 'split', disabled: !D.pages.length, action: () => splitBySize() },
 ];
 const convertMenu = () => [
   { head: n() ? `แปลง ${n()} หน้าที่เลือก` : 'แปลงทุกหน้า' },
+  { label: 'ย่อขนาดไฟล์ PDF…', icon: 'compress', disabled: !D.pages.length, action: () => compressDialog() },
+  { sep: true },
   { label: 'รูปภาพ JPG…', icon: 'img', action: () => convertImages('jpg') },
   { label: 'รูปภาพ PNG…', icon: 'img', action: () => convertImages('png') },
   { label: 'TIFF (1 หน้า = 1 ไฟล์)…', icon: 'img', action: () => convertTiff(false) },
@@ -1303,6 +1307,220 @@ async function splitEvery() {
   } catch (e) { unbusy(); toast('แยกไฟล์ไม่สำเร็จ: ' + e.message, 'err'); return; }
   unbusy();
   await saveMany(frames, D.name, 'pdf');
+}
+
+// v1.9.2: split by file size — each part holds as many consecutive pages as possible without going over the limit
+// (1 MB = 1,048,576 bytes, the same "MB" Windows Explorer shows). PDF sizes are not additive (fonts/images are shared),
+// so the per-page sizes are only a first guess: every part is built for real and checked, then grown/shrunk.
+let splitMB = 5;
+const fmtMB = (b) => (b / 1048576).toFixed(b < 10 * 1048576 ? 2 : 1) + ' MB';
+async function splitBySize() {
+  if (!D.pages.length) return;
+  const nsel = D.selected.size;
+  const r = await dialog({
+    title: 'แบ่งไฟล์ตามขนาด',
+    body: `<div class="field"><label>ขนาดสูงสุดต่อไฟล์ (MB)</label><input name="mb" type="text" inputmode="decimal" value="${splitMB}"></div>` +
+      (nsel ? `<div class="field"><label>หน้าที่จะแบ่ง</label><select name="scope"><option value="all">ทั้งเอกสาร (${D.pages.length} หน้า)</option><option value="sel">เฉพาะหน้าที่เลือก (${nsel} หน้า)</option></select></div>` : '') +
+      `<p>รวมหน้าตามลำดับให้แต่ละไฟล์ได้หน้ามากที่สุดโดยขนาดไม่เกินที่กำหนด (เช่น 2, 4.5, 10)</p>`,
+    focus: 'input',
+  });
+  if (!r.btn) return;
+  const mb = parseFloat(String(r.values.mb || '').replace(',', '.'));
+  if (!(mb > 0)) { toast('กรุณาใส่ขนาดเป็นตัวเลขที่มากกว่า 0 (หน่วย MB)', 'err'); return; }
+  splitMB = mb;
+  const limit = Math.floor(mb * 1048576);
+  const pages = nsel && r.values.scope === 'sel' ? selPages() : D.pages.slice();
+  const num = new Map(D.pages.map((p, i) => [p.uid, i + 1]));
+  const frames = [], over = [];
+  try {
+    const est = [];
+    for (let k = 0; k < pages.length; k++) {
+      busy(`กำลังวัดขนาดแต่ละหน้า … ${k + 1}/${pages.length}`);
+      est.push((await buildPdfInner([pages[k]], true)).bytes.length);
+    }
+    const sumEst = (a, b) => { let t = 0; for (let k = a; k < b; k++) t += est[k]; return t; };
+    // last index (exclusive) of a run from `from` whose estimated size * ratio fits; always at least one page
+    const fit = (from, ratio) => { let j = from + 1, t = est[from]; while (j < pages.length && (t + est[j]) * ratio <= limit) t += est[j++]; return j; };
+    let i = 0;
+    while (i < pages.length) {
+      busy(`กำลังแบ่งไฟล์ … ส่วนที่ ${frames.length + 1} (ถึงหน้า ${i + 1}/${pages.length})`);
+      let best = null, bestJ = i, j = fit(i, 1), ratio = 1;
+      const tried = new Set();
+      for (let tries = 0; tries < 12 && !tried.has(j); tries++) {
+        tried.add(j);
+        const bytes = (await buildPdfInner(pages.slice(i, j), true)).bytes;
+        ratio = bytes.length / sumEst(i, j);
+        if (bytes.length <= limit || j - i === 1) {
+          if (j > bestJ) { best = bytes; bestJ = j; }
+          if (bytes.length > limit || j >= pages.length) break;   // one page alone is bigger than the limit / nothing left
+          const j2 = Math.max(j + 1, fit(i, ratio));               // room left: try more pages
+          if (tried.has(j2)) break;
+          j = j2;
+        } else {
+          let j2 = Math.min(j - 1, fit(i, ratio * 1.01));          // too big: shrink
+          if (j2 <= bestJ) { if (best) break; j2 = Math.max(i + 1, j2); }
+          j = j2;
+        }
+      }
+      if (!best) { // safety net: step down one page at a time
+        for (j = j - 1; j > i; j--) {
+          const bytes = (await buildPdfInner(pages.slice(i, j), true)).bytes;
+          if (bytes.length <= limit || j - i === 1) { best = bytes; bestJ = j; break; }
+        }
+      }
+      const a = num.get(pages[i].uid), b = num.get(pages[bestJ - 1].uid);
+      if (best.length > limit) over.push(a);
+      frames.push({ name: `ส่วนที่${pad(frames.length + 1, 2)}_${bestJ - i > 1 ? `หน้า${pad(a)}-${pad(b)}` : `หน้า${pad(a)}`}.pdf`, bytes: best });
+      i = bestJ;
+    }
+  } catch (e) { unbusy(); toast('แบ่งไฟล์ไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  if (frames.length === 1 && !over.length) {
+    toast(`ไฟล์มีขนาด ${fmtMB(frames[0].bytes.length)} ไม่เกิน ${mb} MB อยู่แล้ว จึงไม่ต้องแบ่ง`, 'ok', [], 5000);
+    return;
+  }
+  if (over.length) toast(`หน้า ${over.join(', ')} มีขนาดเกิน ${mb} MB แม้อยู่หน้าเดียว จึงแยกเป็นไฟล์เดี่ยว (ลองลดขนาดภาพก่อนแบ่ง)`, 'err', [], 8000);
+  window.__lastSplit = frames.map((f) => ({ name: f.name, size: f.bytes.length }));
+  await saveMany(frames, D.name, 'pdf');
+}
+
+// ------------------------------------------------------------------ v1.9.2 compress (ย่อขนาดไฟล์)
+// Re-encodes the pictures inside the PDF (scans, photos) as JPEG at a lower resolution; text, vector drawings,
+// black-and-white (CCITT/JBIG2) images and transparent pictures (signatures, text boxes) are left untouched.
+const COMPRESS_PRESETS = [
+  { key: 'high', label: 'คุณภาพสูง', dpi: 200, q: 0.8, note: '200 dpi · อ่านชัด เหมาะกับพิมพ์' },
+  { key: 'mid', label: 'คุณภาพกลาง', dpi: 150, q: 0.65, note: '150 dpi · สมดุล เหมาะกับส่งอีเมล/อัปโหลด' },
+  { key: 'low', label: 'คุณภาพต่ำ', dpi: 100, q: 0.5, note: '100 dpi · ไฟล์เล็กที่สุด เหมาะกับดูบนจอ' },
+];
+function cmpImages(doc) {
+  const { PDFRawStream, PDFName, PDFArray, PDFNumber, PDFBool } = window.PDFLib;
+  const ctx = doc.context, N = (x) => PDFName.of(x), look = (o) => (o && ctx.lookup(o));
+  const out = [];
+  for (const [ref, obj] of ctx.enumerateIndirectObjects()) {
+    if (!(obj instanceof PDFRawStream)) continue;
+    const d = obj.dict;
+    if (d.get(N('Subtype')) !== N('Image')) continue;
+    if (d.get(N('SMask')) || d.get(N('Mask')) || d.get(N('Decode')) || look(d.get(N('ImageMask'))) === PDFBool.True) continue;
+    let f = look(d.get(N('Filter')));
+    if (f instanceof PDFArray) { if (f.size() !== 1) continue; f = look(f.get(0)); }
+    const kind = f === N('DCTDecode') ? 'jpeg' : f === N('FlateDecode') ? 'flate' : null;
+    if (!kind) continue;
+    let cs = look(d.get(N('ColorSpace'))), comps = 0;
+    if (cs === N('DeviceRGB')) comps = 3; else if (cs === N('DeviceGray')) comps = 1;
+    else if (cs instanceof PDFArray && look(cs.get(0)) === N('ICCBased')) { const icc = look(cs.get(1)); const nn = icc && icc.dict && look(icc.dict.get(N('N'))); comps = nn instanceof PDFNumber ? nn.asNumber() : 0; }
+    if (comps !== 1 && comps !== 3) continue;
+    const num = (k) => { const v = look(d.get(N(k))); return v instanceof PDFNumber ? v.asNumber() : 0; };
+    const w = num('Width'), h = num('Height'), bpc = num('BitsPerComponent') || 8;
+    if (!w || !h || bpc !== 8) continue;
+    let pred = 1, cols = w, colors = comps;
+    const dp = look(d.get(N('DecodeParms')));
+    if (dp && dp.get) { const g = (k) => { const v = look(dp.get(N(k))); return v instanceof PDFNumber ? v.asNumber() : 0; }; pred = g('Predictor') || 1; cols = g('Columns') || w; colors = g('Colors') || comps; }
+    if (kind === 'flate' && (pred === 2 || (pred > 1 && (cols !== w || colors !== comps)))) continue;
+    const len = obj.contents.length;
+    if (len < 16 * 1024) continue; // tiny pictures are not worth it
+    out.push({ ref, obj, kind, comps, w, h, pred, len });
+  }
+  return out;
+}
+function cmpUnpredict(raw, w, h, comps) { // PNG predictors (Predictor >= 10)
+  const bpr = w * comps, out = new Uint8Array(bpr * h);
+  for (let y = 0; y < h; y++) {
+    const t = raw[y * (bpr + 1)], src = y * (bpr + 1) + 1, dst = y * bpr, up = dst - bpr;
+    for (let x = 0; x < bpr; x++) {
+      const a = x >= comps ? out[dst + x - comps] : 0, b = y ? out[up + x] : 0, c = (y && x >= comps) ? out[up + x - comps] : 0;
+      let v = raw[src + x];
+      if (t === 1) v += a; else if (t === 2) v += b; else if (t === 3) v += (a + b) >> 1;
+      else if (t === 4) { const p = a + b - c, pa = Math.abs(p - a), pb = Math.abs(p - b), pc = Math.abs(p - c); v += pa <= pb && pa <= pc ? a : pb <= pc ? b : c; }
+      out[dst + x] = v & 255;
+    }
+  }
+  return out;
+}
+async function cmpDecode(im) {
+  if (im.kind === 'jpeg') return await createImageBitmap(new Blob([im.obj.contents], { type: 'image/jpeg' }));
+  let px = pako.inflate(im.obj.contents);
+  if (im.pred >= 10) px = cmpUnpredict(px, im.w, im.h, im.comps);
+  if (px.length < im.w * im.h * im.comps) throw new Error('short image data');
+  const c = document.createElement('canvas'); c.width = im.w; c.height = im.h;
+  const id = new ImageData(im.w, im.h), o = id.data;
+  for (let i = 0, j = 0, n = im.w * im.h; i < n; i++, j += im.comps) {
+    const r = px[j], g = im.comps === 3 ? px[j + 1] : r, b = im.comps === 3 ? px[j + 2] : r;
+    o[i * 4] = r; o[i * 4 + 1] = g; o[i * 4 + 2] = b; o[i * 4 + 3] = 255;
+  }
+  c.getContext('2d').putImageData(id, 0, 0);
+  return c;
+}
+// re-encode one picture; returns { bytes, w, h } or null when it would not get smaller
+async function cmpEncode(im, preset, maxPx) {
+  const src = await cmpDecode(im);
+  const k = Math.min(1, maxPx / Math.max(im.w, im.h));
+  const w = Math.max(1, Math.round(im.w * k)), h = Math.max(1, Math.round(im.h * k));
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, w, h);
+  g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.drawImage(src, 0, 0, w, h);
+  if (src.close) src.close(); else src.width = src.height = 0;
+  const bytes = await canvasToBytes(c, 'image/jpeg', preset.q);
+  c.width = c.height = 0;
+  return bytes.length < im.len * 0.92 ? { bytes, w, h } : null;
+}
+const cmpMaxPx = (doc, dpi) => Math.round(Math.max(...doc.getPages().map((pg) => { const { width, height } = pg.getSize(); return Math.max(width, height); })) / 72 * dpi);
+async function compressPdfBytes(bytes, preset, onProgress) {
+  const doc = await PDFDocument.load(bytes, { ignoreEncryption: true, updateMetadata: false });
+  const maxPx = cmpMaxPx(doc, preset.dpi);
+  const imgs = cmpImages(doc);
+  let done = 0;
+  for (const im of imgs) {
+    onProgress && onProgress(++done, imgs.length);
+    let r = null; try { r = await cmpEncode(im, preset, maxPx); } catch { r = null; }
+    if (!r) continue;
+    const dict = { Type: 'XObject', Subtype: 'Image', Width: r.w, Height: r.h, BitsPerComponent: 8, ColorSpace: 'DeviceRGB', Filter: 'DCTDecode' };
+    doc.context.assign(im.ref, doc.context.stream(r.bytes, dict));
+  }
+  return await doc.save({ useObjectStreams: true });
+}
+// estimate each preset from a sample of the pictures (fast), then show the choice
+async function compressDialog() {
+  if (!D.pages.length) return;
+  let orig, ests = [];
+  try {
+    busy('กำลังประเมินขนาดไฟล์ …');
+    orig = (await buildPdfInner(D.pages, true)).bytes; // whole document, with edits/text boxes/signatures
+    const doc = await PDFDocument.load(orig, { ignoreEncryption: true, updateMetadata: false });
+    const imgs = cmpImages(doc), imgTotal = imgs.reduce((t, x) => t + x.len, 0);
+    const step = Math.max(1, Math.ceil(imgs.length / 6)), sample = imgs.filter((_, i) => i % step === 0).slice(0, 6);
+    const sTotal = sample.reduce((t, x) => t + x.len, 0);
+    for (const p of COMPRESS_PRESETS) {
+      const maxPx = cmpMaxPx(doc, p.dpi);
+      let sNew = 0;
+      for (const im of sample) { let r = null; try { r = await cmpEncode(im, p, maxPx); } catch {} sNew += r ? r.bytes.length : im.len; }
+      const ratio = sTotal ? sNew / sTotal : 1;
+      ests.push(Math.round(orig.length - imgTotal + imgTotal * ratio));
+    }
+  } catch (e) { unbusy(); toast('ประเมินขนาดไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  const pct = (b) => { const x = Math.round((1 - b / orig.length) * 100); return x > 0 ? ` (เล็กลง ~${x}%)` : ' (ใกล้เคียงเดิม)'; };
+  const r = await dialog({
+    title: 'ย่อขนาดไฟล์ PDF',
+    body: `<p>ขนาดปัจจุบัน <b>${fmtMB(orig.length)}</b> · ${D.pages.length} หน้า</p>` +
+      COMPRESS_PRESETS.map((p, i) => `<label class="opt"><input type="radio" name="q" value="${p.key}" ${p.key === 'mid' ? 'checked' : ''}><span><b>${p.label}</b><span>ประมาณ <b>${fmtMB(ests[i])}</b>${pct(ests[i])}</span><small>${p.note}</small></span></label>`).join('') +
+      `<p class="hint">ย่อเฉพาะรูปภาพในไฟล์ (เช่น หน้าสแกน รูปถ่าย) ข้อความยังค้นหา/คัดลอกได้เหมือนเดิม · ขนาดจริงอาจต่างจากค่าประมาณเล็กน้อย</p>`,
+    buttons: [['cancel', 'ยกเลิก'], ['ok', 'ย่อและบันทึก…', true]],
+  });
+  if (!r.btn) return;
+  const preset = COMPRESS_PRESETS.find((p) => p.key === r.values.q) || COMPRESS_PRESETS[1];
+  let out;
+  try {
+    out = await compressPdfBytes(orig, preset, (i, n) => busy(`กำลังย่อขนาด (${preset.label}) … รูปที่ ${i}/${n}`));
+  } catch (e) { unbusy(); toast('ย่อขนาดไม่สำเร็จ: ' + e.message, 'err'); return; }
+  unbusy();
+  window.__lastCompress = { preset: preset.key, before: orig.length, after: out.length, estimate: ests[COMPRESS_PRESETS.indexOf(preset)] };
+  if (out.length >= orig.length * 0.97) {
+    toast(`ไฟล์นี้ย่อได้ไม่มาก (${fmtMB(orig.length)} → ${fmtMB(out.length)}) เพราะส่วนใหญ่เป็นข้อความหรือภาพขาวดำที่บีบอัดไว้แล้ว`, '', [], 8000);
+    if (out.length >= orig.length) return;
+  }
+  const saved = await saveBytes(out, D.name + '_ย่อขนาด', 'pdf');
+  if (lastSave === 'ok') toast(`ย่อขนาดแล้ว: ${fmtMB(orig.length)} → ${fmtMB(out.length)} (เล็กลง ${Math.round((1 - out.length / orig.length) * 100)}%)`, 'ok', [], 8000);
+  return saved;
 }
 
 // ------------------------------------------------------------------ convert
@@ -1565,7 +1783,18 @@ let annTool = false;              // "add text" tool active
 let annSel = null;                // { uid, id } selected annotation
 let annEditing = false;
 let annClip = null;               // copied annotations
-let annDefaults = { font: 'Tahoma', size: 16, color: '#1f3a93', bold: false, italic: false };
+// v1.9.2: fonts shipped inside the program (web/fonts, @font-face in app.css) — same look on every PC and on iPhone
+const BUNDLED_FONTS = {
+  'TH Sarabun New': { r: 'fonts/THSarabunNew.ttf', b: 'fonts/THSarabunNew-Bold.ttf', i: 'fonts/THSarabunNew-Italic.ttf', bi: 'fonts/THSarabunNew-BoldItalic.ttf' },
+};
+const bundledFontsReady = (async () => {
+  try {
+    await Promise.all(Object.keys(BUNDLED_FONTS).flatMap((f) =>
+      ['', 'bold ', 'italic ', 'italic bold '].map((st) => document.fonts.load(`${st}16px "${f}"`, 'กขAa'))));
+  } catch {}
+  try { if (typeof D !== 'undefined' && D && D.pages && D.pages.length) { renderAllAnnLayers(); refresh(); } } catch {}
+})();
+let annDefaults = { font: 'TH Sarabun New', size: 16, color: '#1f3a93', bold: false, italic: false };
 const annFont = (a, px) => `${a.italic ? 'italic ' : ''}${a.bold ? '700' : '400'} ${px}px "${a.font}", "Leelawadee UI", Tahoma, sans-serif`;
 const mctx = document.createElement('canvas').getContext('2d');
 function annMetrics(a) { // in pt
@@ -1611,6 +1840,7 @@ function drawAnnots(g, p, pg, scale) {
 }
 // put annotations into a copied pdf-lib page: crisp image (looks exactly like on screen) + invisible text (searchable)
 async function embedAnnots(out, pdfPage, p) {
+  await bundledFontsReady;
   const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
   const vb = pg.getViewport({ scale: 1, rotation: pg.rotate });
   const R = pg.rotate || 0;
@@ -1625,7 +1855,7 @@ async function embedAnnots(out, pdfPage, p) {
     const rot = ((R - (a.r || 0)) % 360 + 360) % 360;
     const [px, py] = vb.convertToPdfPoint(...annLocal(a, 0, m.h));
     pdfPage.drawImage(img, { x: px, y: py, width: m.w, height: m.h, rotate: degrees(rot) });
-    const font = await annPdfFont(out, a.font);
+    const font = await annPdfFont(out, a);
     if (font) {
       m.lines.forEach((l, i) => {
         if (!l.trim()) return;
@@ -1636,19 +1866,23 @@ async function embedAnnots(out, pdfPage, p) {
   }
 }
 const fontBytesCache = new Map();
-async function annPdfFont(out, family) { // real font file from Windows (for the invisible, searchable text layer)
-  if (!host.host || !window.fontkit) return null;
-  if (out.__fonts.has(family)) return out.__fonts.get(family);
+async function annPdfFont(out, a) { // real font file (for the invisible, searchable text layer)
+  if (!window.fontkit) return null;
+  const family = a.font, bf = BUNDLED_FONTS[family];
+  if (!bf && !host.host) return null;
+  const variant = (a.bold ? 'b' : '') + (a.italic ? 'i' : '') || 'r';
+  const key = bf ? family + '|' + variant : family;   // v1.9.2: bundled fonts carry their own bold/italic files
+  if (out.__fonts.has(key)) return out.__fonts.get(key);
   let f = null;
   try {
-    if (!fontBytesCache.has(family)) {
-      const r = await fetch('/api/fontfile?family=' + encodeURIComponent(family), { headers: { 'X-Token': TOKEN } });
-      fontBytesCache.set(family, r.ok ? new Uint8Array(await r.arrayBuffer()) : null);
+    if (!fontBytesCache.has(key)) {
+      const r = bf ? await fetch(bf[variant]) : await fetch('/api/fontfile?family=' + encodeURIComponent(family), { headers: { 'X-Token': TOKEN } });
+      fontBytesCache.set(key, r.ok ? new Uint8Array(await r.arrayBuffer()) : null);
     }
-    const bytes = fontBytesCache.get(family);
+    const bytes = fontBytesCache.get(key);
     if (bytes) { out.registerFontkit(window.fontkit); f = await out.embedFont(bytes, { subset: true }); }
   } catch { f = null; }
-  out.__fonts.set(family, f);
+  out.__fonts.set(key, f);
   return f;
 }
 
@@ -1867,8 +2101,8 @@ async function loadFontList() {
   let fams = [];
   if (host.host) { try { fams = await (await api('/api/fonts')).json(); } catch {} }
   const prefer = ['TH Sarabun New', 'TH SarabunPSK', 'Sarabun', 'Tahoma', 'Leelawadee UI', 'Leelawadee', 'Angsana New', 'AngsanaUPC', 'Cordia New', 'Browallia New', 'TH Niramit AS', 'TH Charmonman', 'Arial', 'Times New Roman', 'Calibri', 'Cambria', 'Segoe UI', 'Courier New', 'Thonburi'];
-  const set = new Set(fams);
-  const top = fams.length ? prefer.filter((f) => set.has(f)) : ['Tahoma', 'Leelawadee UI', 'Thonburi', 'Sarabun', 'Arial', 'Times New Roman', 'Courier New'];
+  const set = new Set([...fams, ...Object.keys(BUNDLED_FONTS)]);
+  const top = fams.length ? prefer.filter((f) => set.has(f)) : [...Object.keys(BUNDLED_FONTS), 'Tahoma', 'Leelawadee UI', 'Thonburi', 'Sarabun', 'Arial', 'Times New Roman', 'Courier New'];
   const rest = fams.filter((f) => !top.includes(f) && !f.startsWith('@'));
   $('annFont').innerHTML = `<optgroup label="แนะนำ">${top.map((f) => `<option style="font-family:'${esc(f)}'">${esc(f)}</option>`).join('')}</optgroup>` +
     (rest.length ? `<optgroup label="ฟอนต์ทั้งหมดในเครื่อง">${rest.map((f) => `<option>${esc(f)}</option>`).join('')}</optgroup>` : '');
@@ -2558,6 +2792,7 @@ $('btnSaveMenu').onclick = (e) => {
     { label: 'บันทึกเป็นไฟล์ใหม่…', icon: 'extract', kbd: 'Ctrl+Shift+S', disabled: !D.pages.length, action: () => saveAll(true) },
     { sep: true },
     { label: 'บันทึกเฉพาะหน้าที่เลือก…', icon: 'split', disabled: !D.selected.size, action: () => splitToFile(false) },
+    { label: 'ย่อขนาดไฟล์ (สูง / กลาง / ต่ำ)…', icon: 'compress', disabled: !D.pages.length, action: () => compressDialog() },
   ], r.right - 260, r.bottom + 4);
 };
 async function saveOverwriteDirect() {
@@ -4918,7 +5153,7 @@ async function convertScanWord() {
 
 
 // expose for automated testing
-window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
+window.__superpdf = { compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
