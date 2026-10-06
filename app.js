@@ -1,4 +1,4 @@
-// Super PDF v1.9 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9.1 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
@@ -82,6 +82,14 @@ async function pollPending() {
 // ------------------------------------------------------------------ UI helpers
 function busy(text) { $('busyText').textContent = text; $('busy').classList.remove('hidden'); }
 function unbusy() { $('busy').classList.add('hidden'); }
+// v1.9.1: a rejected promise that no handler caught must never leave the busy overlay up silently
+window.addEventListener('unhandledrejection', (e) => {
+  try {
+    const m = e.reason && (e.reason.message || String(e.reason)) || 'ไม่ทราบสาเหตุ';
+    if (/ResizeObserver|AbortError/.test(m)) return;
+    unbusy(); toast('เกิดข้อผิดพลาด: ' + m, 'err', [], 9000);
+  } catch {}
+});
 
 function toast(msg, kind = '', actions = [], ms = 5000) {
   const el = document.createElement('div');
@@ -192,7 +200,7 @@ async function openPdfSource(name, bytes) {
     try {
       const pdf = await task.promise;
       const id = 's' + (seq++);
-      sources.set(id, { id, name, bytes, pdf, password });
+      sources.set(id, { id, name, bytes, pdf, password, born: Date.now() });
       return sources.get(id);
     } catch (e) {
       if (e && e.name === 'PasswordException') {
@@ -212,7 +220,8 @@ function loadImageEl(blob) {
   return new Promise((res, rej) => {
     const url = URL.createObjectURL(blob);
     const im = new Image();
-    im.onload = () => res(im);
+    // v1.9.1: the decoded bitmap stays valid after the URL is released — release it on both paths
+    im.onload = () => { res(im); setTimeout(() => URL.revokeObjectURL(url), 0); };
     im.onerror = () => { URL.revokeObjectURL(url); rej(new Error('อ่านรูปภาพไม่ได้')); };
     im.src = url;
   });
@@ -239,7 +248,15 @@ function jpegOrientation(b) {
 }
 
 function canvasToBytes(canvas, type, q) {
-  return new Promise((res) => canvas.toBlob((b) => b.arrayBuffer().then((a) => res(new Uint8Array(a))), type, q));
+  // v1.9.1: always settles — toBlob() may hand back null (huge canvas / low memory) and arrayBuffer() may reject
+  return new Promise((res, rej) => {
+    try {
+      canvas.toBlob((b) => {
+        if (!b) { rej(new Error('สร้างข้อมูลรูปภาพไม่สำเร็จ (ภาพใหญ่เกินไปหรือหน่วยความจำไม่พอ)')); return; }
+        b.arrayBuffer().then((a) => res(new Uint8Array(a)), (e) => rej(e instanceof Error ? e : new Error(String(e || 'อ่านข้อมูลรูปภาพไม่สำเร็จ'))));
+      }, type, q);
+    } catch (e) { rej(e); }
+  });
 }
 
 async function imagesToPdf(images) {
@@ -439,6 +456,42 @@ async function closeTab(d) {
   if (!docs.length) newDoc();
   if (D === d || !docs.includes(D)) { D = null; switchTo(docs[Math.min(i, docs.length - 1)]); }
   else refresh();
+  gcSources();
+}
+
+// v1.9.1: release PDF sources / thumbnails nobody references any more (open tabs, their undo/redo history, clipboard).
+// Sources younger than SRC_GRACE_MS are kept: they may be mid-import and not yet attached to a page.
+const SRC_GRACE_MS = 30000;
+let gcTimer = 0;
+function gcSources() {
+  const live = new Set();
+  const addPages = (list) => { for (const p of list || []) live.add(p.src); };
+  for (const d of docs) {
+    addPages(d.pages);
+    for (const s of d.undo || []) addPages(s.pages);
+    for (const s of d.redo || []) addPages(s.pages);
+  }
+  if (clip) for (const it of clip.items || []) live.add(it.src);
+  let young = false;
+  const dead = new Set();
+  for (const [id, s] of sources) {
+    if (live.has(id)) continue;
+    if (Date.now() - (s.born || 0) < SRC_GRACE_MS) { young = true; continue; }
+    dead.add(id);
+  }
+  if (young && !gcTimer) gcTimer = setTimeout(() => { gcTimer = 0; gcSources(); }, SRC_GRACE_MS + 1000);
+  if (!dead.size) return 0;
+  for (const id of dead) {
+    const s = sources.get(id);
+    sources.delete(id); libCache.delete(id);
+    try { const r = s.pdf && s.pdf.destroy && s.pdf.destroy(); if (r && r.catch) r.catch(() => {}); } catch {}
+    s.bytes = null; s.pdf = null;
+  }
+  for (const [k, url] of [...thumbCache]) {
+    if (dead.has(k.split(':')[0])) { thumbCache.delete(k); try { if (url) URL.revokeObjectURL(url); } catch {} }
+  }
+  for (let i = thumbQueue.length - 1; i >= 0; i--) if (dead.has(thumbQueue[i].p.src)) thumbQueue.splice(i, 1);
+  return dead.size;
 }
 
 $('tabs').addEventListener('click', (e) => {
@@ -507,6 +560,7 @@ async function renderThumb(p) {
   drawAnnots(g, p, page, vp.scale);
   const blob = await new Promise((r) => c.toBlob(r, IS_TOUCH ? 'image/jpeg' : 'image/png', 0.85));
   c.width = c.height = 0;
+  if (!blob) throw new Error('thumb');
   return URL.createObjectURL(blob);
 }
 
@@ -2274,8 +2328,10 @@ async function renderPrintImages(list) {
   for (let i = 0; i < list.length; i++) {
     busy(`กำลังเตรียมพิมพ์ … หน้า ${i + 1}/${list.length}`);
     const c = await renderPageCanvas(list[i], (IS_TOUCH ? 150 : 200) / 72);
-    const im = new Image(); im.src = URL.createObjectURL(await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9)));
+    const pb = await new Promise((r) => c.toBlob(r, 'image/jpeg', 0.9));
     c.width = c.height = 0;
+    if (!pb) throw new Error('สร้างภาพสำหรับพิมพ์ไม่สำเร็จ (หน่วยความจำไม่พอ)');
+    const im = new Image(); im.src = URL.createObjectURL(pb);
     area.appendChild(im);
   }
   await Promise.all([...area.images || area.querySelectorAll('img')].map((im) => im.decode().catch(() => {})));
@@ -2358,7 +2414,9 @@ async function buildPdfInner(list, quiet = false) {
 const cleanName = (s) => s.replace(/[\\/:*?"<>|]/g, '_');
 
 // save one file (host dialog, or browser download)
+let lastSave = '';   // v1.9.1: result of the last saveBytes(): 'ok' | 'cancel' | 'error'
 async function saveBytes(bytes, name, extn = 'pdf', onSaved = null) {
+  lastSave = 'error';
   name = cleanName(name);
   if (host.host) {
     try {
@@ -2368,17 +2426,20 @@ async function saveBytes(bytes, name, extn = 'pdf', onSaved = null) {
       unbusy();
       if (r.ok) {
         if (onSaved) onSaved(r.path);
+        lastSave = 'ok';
         toast('บันทึกแล้ว: ' + r.path, 'ok', [
           ['เปิดไฟล์', () => api('/api/openpdf', { method: 'POST', body: r.path })],
           ['เปิดโฟลเดอร์', () => api('/api/reveal', { method: 'POST', body: r.path })],
         ], 8000);
         return true;
       }
-      if (r.error) toast('บันทึกไม่สำเร็จ: ' + r.error, 'err', [], 9000);
+      if (r.error) toast('บันทึกไม่สำเร็จ: ' + r.error, 'err', [], 9000); else lastSave = 'cancel';
       return false;
-    } catch (e) { unbusy(); toast('บันทึกไม่สำเร็จ: ' + e.message, 'err'); return false; }
+    } catch (e) { unbusy(); lastSave = 'error'; toast('บันทึกไม่สำเร็จ: ' + e.message, 'err'); return false; }
   }
-  return deliver([{ name, bytes }]);
+  const okd = await deliver([{ name, bytes }]);
+  lastSave = okd ? 'ok' : 'cancel';
+  return okd;
 }
 const MIME = { pdf: 'application/pdf', jpg: 'image/jpeg', png: 'image/png', tif: 'image/tiff', tiff: 'image/tiff', mtiff: 'image/tiff', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', txt: 'text/plain' };
 // browser/iPhone: offer the share sheet (Save to Files, LINE, Mail…) or a plain download
@@ -2560,10 +2621,18 @@ window.addEventListener('drop', async (e) => {
   const onTabbar = e.target.closest && e.target.closest('#tabbar');
   const tabEl = e.target.closest && e.target.closest('.tab');
   const d = mode === 'organize' ? dropIndexFromEvent(e) : null; clearDropMarks();
-  const fs = await Promise.all([...e.dataTransfer.files].map(readFile));
+  // v1.9.1: read each file on its own; report files that cannot be read and continue with the rest
+  const dropped = [...e.dataTransfer.files];
+  const rs = await Promise.allSettled(dropped.map(readFile));
+  const fs = [], bad = [];
+  rs.forEach((r, k) => { if (r.status === 'fulfilled') fs.push(r.value); else bad.push(dropped[k].name || ('ไฟล์ที่ ' + (k + 1))); });
+  if (bad.length) toast(`อ่านไฟล์ไม่ได้ ${bad.length} ไฟล์: ${bad.join(', ')}${fs.length ? ` — นำเข้าเฉพาะอีก ${fs.length} ไฟล์ที่อ่านได้` : ''}`, 'err', [], 10000);
+  if (!fs.length) return;
+  try {
   if (tabEl) { const t = docs.find((x) => x.id === tabEl.dataset.id); switchTo(t); await insertFiles(fs); }
   else if (onTabbar || !D.pages.length) await openPicked(fs);
   else await insertFiles(fs, d ? d.i : D.pages.length);
+  } catch (err) { unbusy(); toast('นำเข้าไฟล์ไม่สำเร็จ: ' + (err.message || err), 'err', [], 9000); }
 });
 
 // keyboard
@@ -4835,14 +4904,21 @@ async function convertScanWord() {
     const bytes = owDocx(out);
     done();
     const forms = out.filter((p) => p.kind === 'form').length;
-    await saveBytes(bytes, D.name + ' (OCR).docx', 'docx');
+    const saved = await saveBytes(bytes, D.name + ' (OCR).docx', 'docx');
+    if (!saved) {
+      // v1.9.1: never claim success when the file was not written
+      toast(lastSave === 'cancel'
+        ? `อ่านข้อความครบ ${list.length} หน้าแล้ว แต่ยังไม่ได้บันทึกไฟล์ Word เพราะยกเลิกการบันทึก — ต้องสั่งแปลงใหม่เพื่อสร้างไฟล์`
+        : `อ่านข้อความครบ ${list.length} หน้าแล้ว แต่บันทึกไฟล์ Word ไม่สำเร็จ — ไม่มีไฟล์ใหม่ ลองสั่งแปลงอีกครั้งหรือเลือกตำแหน่งอื่น`, lastSave === 'cancel' ? '' : 'err', [], 12000);
+      return;
+    }
     toast(`แปลงเสร็จ ${list.length} หน้า${forms ? ` (แทรกเป็นภาพ ${forms} หน้า)` : ''} · มีบรรทัดที่ควรตรวจทาน ${low}/${words} บรรทัด (ไฮไลต์สีเหลือง)`, 'ok', [], 8000);
   } catch (e) { done(); if (!cancelled) toast('แปลงไม่สำเร็จ: ' + e.message, 'err', [], 9000); else toast('ยกเลิกการแปลงแล้ว'); }
 }
 
 
 // expose for automated testing
-window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo };
+window.__superpdf = { IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
