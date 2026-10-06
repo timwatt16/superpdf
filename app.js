@@ -1,4 +1,4 @@
-// Super PDF v1.9.3 — front-end (runs inside Edge app window served by SuperPDF.exe)
+// Super PDF v1.9.4 — front-end (runs inside Edge app window served by SuperPDF.exe)
 import * as pdfjsLib from './pdf.min.mjs';
 pdfjsLib.GlobalWorkerOptions.workerSrc = './pdf.worker.min.mjs';
 const { PDFDocument, degrees } = window.PDFLib;
@@ -16,7 +16,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 // ------------------------------------------------------------------ state
 const sources = new Map();   // id -> { id, name, bytes, pdf (pdfjs doc), password, blank }
 const docs = [];             // tabs: { id, name, pages:[{uid,src,index,rot}], selected:Set, lastClicked, undo:[], redo:[], dirty, scroll:{} }
-const APP_VERSION = '1.9.3';   // shown at the top-left (#appVer) — change here and in index.html when releasing
+const APP_VERSION = '1.9.4';   // shown at the top-left (#appVer) — change here and in index.html when releasing
 let D = null;                // active doc
 let mode = 'organize';
 let host = { host: false };
@@ -966,17 +966,45 @@ document.addEventListener('paste', async (e) => {
 // Sources: our own copied pages, files (PDF / images / Office) and pictures copied in other apps,
 // text (becomes a new page), or a link to a PDF / picture.
 const TYPE_EXT = { 'image/png': 'png', 'image/jpeg': 'jpg', 'image/gif': 'gif', 'image/webp': 'webp', 'image/bmp': 'bmp', 'image/heic': 'heic', 'image/heif': 'heif', 'image/tiff': 'tiff', 'application/pdf': 'pdf' };
+// v1.9.4: guess a file type from its first bytes (iPhone apps sometimes hand over pictures with odd/blank types)
+function sniffExt(b) {
+  if (b[0] === 0xFF && b[1] === 0xD8) return 'jpg';
+  if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'png';
+  if (b[0] === 0x47 && b[1] === 0x49 && b[2] === 0x46) return 'gif';
+  if (b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46) return 'pdf';
+  if (b[0] === 0x42 && b[1] === 0x4D) return 'bmp';
+  if (b[8] === 0x57 && b[9] === 0x45 && b[10] === 0x42 && b[11] === 0x50) return 'webp';
+  if ((b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2A) || (b[0] === 0x4D && b[1] === 0x4D && b[3] === 0x2A)) return 'tiff';
+  const t = String.fromCharCode(...b.slice(4, 12));
+  if (t.startsWith('ftyp') && /^(heic|heix|heim|heis|hevc|hevx|mif1|msf1)$/.test(t.slice(4))) return 'heic';
+  return '';
+}
+const pasteName = (n, e2) => (e2 === 'pdf' ? `ไฟล์ที่วาง_${n}.pdf` : `ภาพที่วาง_${n}.${e2}`);
+const isUsefulType = (t) => !!TYPE_EXT[t] || /^image\//.test(t) || /(jpeg|png|heic|heif|gif|tiff|pdf)$/i.test(t);
 async function readPasteEvent(e) {
   const cd = e.clipboardData, files = [];
   let n = 0;
-  for (const f of cd.files) {
-    n++;
+  const seen = new Set();
+  const addFile = async (f) => {
+    if (!f || seen.has(f)) return; seen.add(f);
     const r = await readFile(f);
-    const e2 = TYPE_EXT[f.type];
-    const generic = !f.name || /^image\.(png|jpe?g)$/i.test(f.name);
-    files.push({ ...r, name: generic ? `ภาพที่วาง_${n}.${e2 || 'png'}` : f.name });
+    const e2 = TYPE_EXT[f.type] || sniffExt(r.bytes);
+    if (!e2 && !/\.[a-z0-9]{2,5}$/i.test(f.name || '')) return;
+    n++;
+    const generic = !f.name || /^image\.(png|jpe?g|heic)$/i.test(f.name) || !/\.[a-z0-9]{2,5}$/i.test(f.name);
+    files.push({ ...r, name: generic ? pasteName(n, e2 || 'png') : f.name });
+  };
+  for (const f of cd.files || []) await addFile(f);
+  if (!files.length) for (const it of cd.items || []) if (it.kind === 'file') await addFile(it.getAsFile());
+  // pictures pasted as HTML (<img src="data:..."> or blob:)
+  if (!files.length) {
+    const html = cd.getData('text/html') || '';
+    for (const m of html.matchAll(/<img[^>]+src="(data:image\/[^"]+|blob:[^"]+)"/gi)) {
+      try { const b = new Uint8Array(await (await fetch(m[1].replace(/&amp;/g, '&'))).arrayBuffer()); const e2 = sniffExt(b); if (e2) files.push({ name: pasteName(++n, e2), bytes: b }); } catch {}
+    }
   }
-  return { files, text: cd.getData('text/plain') || '' };
+  const types = [...new Set([...(cd.types || []), ...[...(cd.items || [])].map((i) => i.type)])];
+  return { files, text: cd.getData('text/plain') || '', types };
 }
 async function insertOrOpen(files, pos) {
   if (!D.pages.length) await openAsTabs(files, { merge: true });
@@ -1011,26 +1039,49 @@ async function pasteAny(at = null) {
   if (navigator.clipboard && navigator.clipboard.read) {
     try {
       const items = await navigator.clipboard.read();
-      const files = []; let text = '', n = 0;
+      const files = []; let text = '', n = 0; const types = [];
       for (const it of items) {
-        const t = it.types.find((x) => TYPE_EXT[x]);
-        if (t) { n++; files.push({ name: `ภาพที่วาง_${n}.${TYPE_EXT[t]}`.replace('ภาพที่วาง_' + n + '.pdf', 'ไฟล์ที่วาง_' + n + '.pdf'), bytes: new Uint8Array(await (await it.getType(t)).arrayBuffer()) }); continue; }
-        if (!text && it.types.includes('text/plain')) text = await (await it.getType('text/plain')).text();
+        types.push(...it.types);
+        // prefer a type we know, else any picture type (iPhone apps such as LINE may use unusual names)
+        const t = it.types.find((x) => TYPE_EXT[x]) || it.types.find(isUsefulType);
+        if (t) {
+          try {
+            const b = new Uint8Array(await (await it.getType(t)).arrayBuffer());
+            const e2 = sniffExt(b) || TYPE_EXT[t];
+            if (e2) { files.push({ name: pasteName(++n, e2), bytes: b }); continue; }
+          } catch {}
+        }
+        if (!text && it.types.includes('text/plain')) { try { text = await (await it.getType('text/plain')).text(); } catch {} }
+        if (!text && it.types.includes('text/html')) { // picture inside HTML
+          try {
+            const html = await (await it.getType('text/html')).text();
+            for (const m of html.matchAll(/<img[^>]+src="(data:image\/[^"]+)"/gi)) { const b = new Uint8Array(await (await fetch(m[1])).arrayBuffer()); const e2 = sniffExt(b); if (e2) files.push({ name: pasteName(++n, e2), bytes: b }); }
+          } catch {}
+        }
       }
-      return applyPasted({ files, text }, pos);
+      if (files.length || (text && text.trim()) || (clip && !items.length)) return applyPasted({ files, text }, pos);
+      lastClipTypes = types;
+      // nothing usable came through this way -> let the user paste into a box (iPhone hands pictures over there)
     } catch (e) { /* not allowed / unsupported -> paste box */ }
   }
   // 3) fallback: a box where the user long-presses / right-clicks and chooses "Paste"
   const data = await pasteBox();
-  if (data) return applyPasted(data, pos);
+  if (!data) return;
+  if (!data.files.length && !(data.text && data.text.trim())) {
+    const ty = [...new Set([...(lastClipTypes || []), ...(data.types || [])])].filter(Boolean);
+    toast('ไม่พบไฟล์ รูปภาพ หรือข้อความในคลิปบอร์ด' + (ty.length ? ` (ชนิดข้อมูลที่ได้รับ: ${ty.join(', ')})` : '') + ' · ทางเลือก: บันทึกรูปลงแอปรูปภาพ แล้วกด "สแกนเอกสาร (ถ่ายรูป / เลือกรูป)"', '', [], 12000);
+    return;
+  }
+  return applyPasted(data, pos);
 }
+let lastClipTypes = null;
 
 function pasteBox() {
   return new Promise((resolve) => {
     let got = null;
     dialog({
       title: 'วางจากแอปอื่น',
-      body: `<p>${IS_TOUCH ? 'แตะค้างในกรอบด้านล่าง แล้วเลือก <b>“วาง”</b>' : 'คลิกในกรอบด้านล่าง แล้วกด <b>Ctrl+V</b>'}</p>
+      body: `<p>${IS_TOUCH ? 'แตะค้างในกรอบด้านล่าง แล้วเลือก <b>“วาง”</b> (ใช้กับรูปที่คัดลอกจาก LINE / แอปรูปภาพ ได้)' : 'คลิกในกรอบด้านล่าง แล้วกด <b>Ctrl+V</b>'}</p>
         <div id="pasteZone" class="pastezone" contenteditable="true" inputmode="none"></div>`,
       buttons: [['cancel', 'ยกเลิก']],
     }).then(() => resolve(got));
@@ -5191,7 +5242,7 @@ async function convertScanWord() {
 
 
 // expose for automated testing
-window.__superpdf = { isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
+window.__superpdf = { pasteAny, readPasteEvent, sniffExt, isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';
