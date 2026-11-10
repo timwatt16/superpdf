@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "bc-ai-account": {
+      "type": "http",
+      "url": "https://www.bcaiaccount.com/api/mcp",
+      "headers": {
+        "Authorization": "Bearer ${BC_AI_ACCOUNT_TOKEN}"
+      }
+    }
+  }
+}
