@@ -1,13 +1,21 @@
-// Super PDF v1.9 — Thai OCR worker (PP-OCRv5 mobile detection + Thai recognition, onnxruntime-web, single thread)
+// Super PDF v1.9.8 — Thai OCR worker (iApp OpenThai2.0-OCR-Text: PP-OCRv6-tiny detection + Thai recognition, onnxruntime-web, single thread)
 // in : {type:'init', base}            -> {type:'ready'} | {type:'error'}
 //      {type:'page', id, w, h, data}  (RGBA Uint8ClampedArray, transferred)
 // out: {type:'page', id, w, h, skew, vl, lines:[{b:[x0,y0,x1,y1], t, c, low}]}   low = '0'/'1' per char (uncertain)
 import * as ort from './ort.wasm.min.mjs';
 
 let det = null, rec = null, chars = null;
+// v1.9.8: iApp OpenThai2.0-OCR-Text (PP-OCRv6-tiny detector + Thai CTC recognizer fine-tuned by iApp, Apache-2.0) replaces
+// PaddleOCR PP-OCRv5 (v1.9–1.9.7): measured 96.3% -> 98.4% characters on real scanned tax invoices, ~2.5x faster.
+// th/box/unclip from the model's det.yml; flatten + canon as in iApp's runtime; xs = 1.3 horizontal stretch (more CTC frames)
+const MODELS = {
+  ot2: { det: 'det_ot2.onnx', rec: 'rec_ot2.onnx', dict: 'dict_ot2.txt', th: 0.2, box: 0.4, unclip: 1.4, limit: 1600, flatten: true, canon: true, xs: 1.3 },
+};
+let M = MODELS.ot2;
 const post = (m, tr) => self.postMessage(m, tr || []);
 
-async function init(base) {
+async function init(base, model, over) {
+  M = { ...(MODELS[model] || MODELS.ot2), ...(over || {}) };
   ort.env.wasm.numThreads = 1;
   ort.env.wasm.proxy = false;
   ort.env.wasm.wasmPaths = base;
@@ -15,9 +23,9 @@ async function init(base) {
   const gz = new Uint8Array(await (await fetch(base + 'ort-wasm-simd-threaded.wasm.gz')).arrayBuffer());
   ort.env.wasm.wasmBinary = await gunzip(gz);
   const opt = { executionProviders: ['wasm'], graphOptimizationLevel: 'all' };
-  det = await ort.InferenceSession.create(await bytes(base + 'det.onnx'), opt);
-  rec = await ort.InferenceSession.create(await bytes(base + 'rec_th.onnx'), opt);
-  const dict = (await (await fetch(base + 'dict_th.txt')).text()).split('\n').map((s) => s.replace(/\r$/, '')).filter((s) => s !== '');
+  det = await ort.InferenceSession.create(await bytes(base + M.det), opt);
+  rec = await ort.InferenceSession.create(await bytes(base + M.rec), opt);
+  const dict = (await (await fetch(base + M.dict)).text()).split('\n').map((s) => s.replace(/\r$/, '')).filter((s) => s !== '');
   chars = ['', ...dict, ' '];
   await loadDict(base);
 }
@@ -175,7 +183,7 @@ function toTensorBGR(rgba, w, h, mean, std, out, off) {
 
 // ---------------- text-line detection (DB post-process on axis-aligned components)
 async function detect(rgba, W, H) {
-  const r = Math.min(1, 1600 / Math.max(W, H));
+  const r = Math.min(1, M.limit / Math.max(W, H));
   const w = Math.max(32, Math.round(W * r / 32) * 32), h = Math.max(32, Math.round(H * r / 32) * 32);
   const small = resizeRGBA(rgba, W, H, w, h);
   const x = new Float32Array(3 * w * h);
@@ -188,7 +196,7 @@ async function detect(rgba, W, H) {
   const stack = new Int32Array(w * h);
   let n = 0;
   for (let s = 0; s < w * h; s++) {
-    if (p[s] <= 0.3 || lab[s]) continue;
+    if (p[s] <= M.th || lab[s]) continue;
     n++; let sp = 0; stack[sp++] = s; lab[s] = n;
     let x0 = w, y0 = h, x1 = 0, y1 = 0, cnt = 0, sum = 0, mx = 0, my = 0, mxx = 0, myy = 0, mxy = 0;
     while (sp) {
@@ -197,16 +205,16 @@ async function detect(rgba, W, H) {
       if (px < x0) x0 = px; if (px > x1) x1 = px; if (py < y0) y0 = py; if (py > y1) y1 = py;
       for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
         const qx = px + dx, qy = py + dy; if (qx < 0 || qy < 0 || qx >= w || qy >= h) continue;
-        const q = qy * w + qx; if (!lab[q] && p[q] > 0.3) { lab[q] = n; stack[sp++] = q; }
+        const q = qy * w + qx; if (!lab[q] && p[q] > M.th) { lab[q] = n; stack[sp++] = q; }
       }
     }
     const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
     if (Math.min(bw, bh) < 3 || cnt < 4) continue;
-    if (sum / cnt < 0.55) continue;
+    if (sum / cnt < M.box) continue;
     // orientation of the component (for deskew)
     const cxm = mx / cnt, cym = my / cnt, vxx = mxx / cnt - cxm * cxm, vyy = myy / cnt - cym * cym, vxy = mxy / cnt - cxm * cym;
     const ang = 0.5 * Math.atan2(2 * vxy, vxx - vyy) * 180 / Math.PI;
-    const d = (bw * bh) * 1.5 / (2 * (bw + bh));            // unclip distance (area * ratio / perimeter)
+    const d = (bw * bh) * M.unclip / (2 * (bw + bh));            // unclip distance (area * ratio / perimeter)
     const X0 = Math.max(0, x0 - d), Y0 = Math.max(0, y0 - d), X1 = Math.min(w, x1 + 1 + d), Y1 = Math.min(h, y1 + 1 + d);
     if (Math.min(X1 - X0, Y1 - Y0) < 5) continue;
     boxes.push({ b: [X0 * sx, Y0 * sy, X1 * sx, Y1 * sy], ang, len: bw * sx, hh: bh * sy, pr: [X0, Y0, X1, Y1] });
@@ -215,7 +223,10 @@ async function detect(rgba, W, H) {
 }
 function splitTall(boxes, p, w, h, sx, sy) { // two touching Thai lines detected as one tall box -> split at the weakest row
   if (boxes.length < 3) return boxes;
-  const hs = boxes.map((b) => b.b[3] - b.b[1]).sort((a, b) => a - b), mh = hs[hs.length >> 1];
+  // typical line height from line-shaped boxes only: detached Thai marks / dots make small boxes that would pull the
+  // median down and get every normal line cut into three (v1.9.8 fix)
+  const lineish = boxes.filter((b) => b.b[2] - b.b[0] >= 2 * (b.b[3] - b.b[1]));
+  const hs = (lineish.length >= 3 ? lineish : boxes).map((b) => b.b[3] - b.b[1]).sort((a, b) => a - b), mh = hs[hs.length >> 1];
   const out = [];
   for (const b of boxes) {
     const bh = b.b[3] - b.b[1];
@@ -224,12 +235,14 @@ function splitTall(boxes, p, w, h, sx, sy) { // two touching Thai lines detected
     const prof = [];
     for (let y = Y0; y < Y1; y++) { let s = 0; for (let x = X0; x < X1; x++) s += p[y * w + x]; prof.push(s / Math.max(1, X1 - X0)); }
     const n = Math.round(bh / mh), cuts = [];
+    const pmax = Math.max(...prof);
     for (let k = 1; k < n; k++) {
       const c = Math.floor(prof.length * k / n), r = Math.max(2, Math.floor(prof.length / (3 * n)));
       let best = c, bv = 1e9;
       for (let i = Math.max(0, c - r); i < Math.min(prof.length, c + r); i++) if (prof[i] < bv) { bv = prof[i]; best = i; }
-      cuts.push(best);
+      if (bv < 0.35 * pmax) cuts.push(best);          // only where the detector really sees a gap between lines
     }
+    if (!cuts.length) { out.push(b); continue; }
     const ys = [0, ...cuts, prof.length];
     for (let k = 0; k + 1 < ys.length; k++) {
       if (ys[k + 1] - ys[k] < 4) continue;
@@ -260,12 +273,14 @@ async function recognize(rgba, W, H, boxes) {
   const HH = 48;
   for (let s = 0; s < order.length; s += 8) {
     const ids = order.slice(s, s + 8);
-    const maxr = Math.max(...ids.map((i) => crops[i].w / crops[i].h));
+    const XS = M.xs || 1;                                     // horizontal stretch (more CTC frames per character)
+    const maxr = Math.max(...ids.map((i) => crops[i].w / crops[i].h)) * XS;
     const WW = Math.ceil(HH * Math.max(maxr, 320 / 48));
     const x = new Float32Array(ids.length * 3 * HH * WW);   // zero = mid-grey after normalisation (same padding as Paddle)
     ids.forEach((i, k) => {
-      const c = crops[i], w = Math.min(WW, Math.ceil(HH * c.w / c.h));
+      const c = crops[i], w = Math.min(WW, Math.ceil(HH * c.w / c.h * XS));
       const r = resizeRGBA(c.data, c.w, c.h, w, HH);
+      if (M.flatten) flattenRGBA(r, w, HH);
       const plane = HH * WW, off = k * 3 * plane;
       for (let yy = 0; yy < HH; yy++) for (let xx = 0; xx < w; xx++) {
         const j = (yy * w + xx) * 4, o = yy * WW + xx;
@@ -286,6 +301,51 @@ async function recognize(rgba, W, H, boxes) {
     });
   }
   return res;
+}
+
+// digits misread as look-alike letters inside numbers (0 -> O o ๐, 5 -> S, 1 -> I l) and a decimal comma at the end
+// of an amount ("88,226,21" / "280,00" -> ".") — v1.9.8, seen on real tax invoices. Keeps the length (the 'low' mask).
+function fixDigits(t) {
+  t = t.replace(/[0-9OoSIl\u0e50][0-9OoSIl\u0e50,.\-/]*[0-9OoSIl\u0e50]/g, (tok) => {
+    const ar = (tok.match(/[0-9]/g) || []).length, odd = (tok.match(/[OoSIl\u0e50]/g) || []).length;
+    if (!odd || ar < 3 || ar < 2 * odd || /[\u0e51-\u0e59]/.test(tok)) return tok;   // real words / Thai numerals stay
+    return tok.replace(/[Oo\u0e50]/g, '0').replace(/S/g, '5').replace(/[Il]/g, '1');
+  });
+  return t.replace(/(\b\d{3}|\b\d{1,3}(?:,\d{3})+),(\d{2})(?![\d,])/g, '$1.$2');
+}
+
+// one spelling for Thai that renders the same (iApp thai_norm.canonical): NFC, vowel marks before tone marks, ํ+า -> ำ
+const TH_V = 'ัิีึืฺุู็', TH_T = '่้๊๋์๎';
+function thaiCanon(t) {
+  t = (t || '').normalize('NFC');
+  t = t.replace(/[\u0e31\u0e34-\u0e3a\u0e47-\u0e4e]{2,}/g, (run) => {
+    const o = []; for (const ch of [...run].sort((a, b) => (TH_V.includes(a) ? 0 : TH_T.includes(a) ? 1 : 2) - (TH_V.includes(b) ? 0 : TH_T.includes(b) ? 1 : 2))) if (o[o.length - 1] !== ch) o.push(ch);
+    return o.join('');
+  });
+  return t.replace(/([\u0e48-\u0e4b]?)\u0e4d([\u0e48-\u0e4b]?)\u0e32/g, '$1$2\u0e33').replace(/\u0e40\u0e40/g, '\u0e41').replace(/\u0e33\u0e33/g, '\u0e33');
+}
+
+// grey line crop with each column's background (median of top/bottom margin rows) removed — iApp's "flatten"
+function flattenRGBA(r, w, h) {
+  const g = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) g[i] = r[i * 4] * 0.299 + r[i * 4 + 1] * 0.587 + r[i * 4 + 2] * 0.114;
+  const k = Math.max(2, (h / 6) | 0), bg0 = new Float32Array(w), col = [];
+  for (let x = 0; x < w; x++) {
+    col.length = 0;
+    for (let y = 0; y < k; y++) { col.push(g[y * w + x], g[(h - 1 - y) * w + x]); }
+    col.sort((a, b) => a - b); bg0[x] = col[col.length >> 1];
+  }
+  const R = Math.min(h | 1, 255) >> 1, bg = new Float32Array(w), win = [];
+  for (let x = 0; x < w; x++) { // median along the line
+    win.length = 0; for (let j = Math.max(0, x - R); j <= Math.min(w - 1, x + R); j++) win.push(bg0[j]);
+    win.sort((a, b) => a - b); bg[x] = win[win.length >> 1];
+  }
+  const d = new Float32Array(w * h), hist = new Uint32Array(256);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) { const v = Math.abs(g[y * w + x] - bg[x]); d[y * w + x] = v; hist[Math.min(255, v | 0)]++; }
+  let acc = 0, hi = 255; const lim = 0.98 * w * h;
+  for (let i = 0; i < 256; i++) { acc += hist[i]; if (acc >= lim) { hi = i; break; } }
+  hi = Math.max(hi, 24);
+  for (let i = 0; i < w * h; i++) { const v = 255 - Math.min(255, d[i] * 255 / hi); r[i * 4] = r[i * 4 + 1] = r[i * 4 + 2] = v; }
 }
 
 // vertical ruling lines (forms have many): adaptive threshold, vertical dark runs >= 1.5% of the page height
@@ -330,16 +390,33 @@ async function page(m) {
     }
   }
   const texts = await recognize(rgba, W, H, boxes);
-  const hs = boxes.map((b) => b.b[3] - b.b[1]).sort((a, b) => a - b), medh = hs.length ? hs[hs.length >> 1] : 0;
+  const lineish = boxes.filter((b) => b.b[2] - b.b[0] >= 2 * (b.b[3] - b.b[1]));
+  const hs = (lineish.length >= 3 ? lineish : boxes).map((b) => b.b[3] - b.b[1]).sort((a, b) => a - b), medh = hs.length ? hs[hs.length >> 1] : 0;
+  // v1.9.8: detached Thai marks (tone marks / upper vowels found as their own little box right above or below a line)
+  const isFrag = (bx) => {
+    const hh = bx.b[3] - bx.b[1];
+    if (hh >= 0.7 * medh) return false;
+    return boxes.some((o) => o !== bx && o.b[3] - o.b[1] >= 0.8 * medh && o.b[0] < bx.b[2] && o.b[2] > bx.b[0] &&
+      bx.b[1] < o.b[3] + 0.5 * medh && bx.b[3] > o.b[1] - 0.5 * medh);
+  };
   const lines = [];
   boxes.forEach((bx, i) => {
     const { t, c, low, pp } = texts[i], hh = bx.b[3] - bx.b[1];
+    if (isFrag(bx) && (t.trim().length <= 4 || c < 0.9)) return;
+    if (M.minConf && c < M.minConf && t.trim().length <= 6) return;
     if (c < 0.5 && t.trim().length <= 3) return;
     if (hh < 0.45 * medh && c < 0.8) return;
     if (hh < 0.85 * medh && c < 0.6) return;
     if (!t.trim()) return;
-    const sp = spell(t, low);
-    lines.push({ b: bx.b, t: sp.t, c, low: sp.low, raw: t });
+    let tt = t, ll = low;
+    if (M.canon) { tt = thaiCanon(t); if (tt.length !== t.length) ll = '0'.repeat(tt.length); }
+    const sp = spell(tt, ll);
+    // amounts read as "9, 118, 563. 00" -> "9,118,563.00" (stray spaces after thousands separators / decimal point)
+    let ft = sp.t, fl = sp.low;
+    const re = /\d(?:, (?=\d{3}(?!\d))|\. (?=\d{2}(?![\d,])))/;
+    for (let k = 0, mm; k < 12 && (mm = re.exec(ft)); k++) { const at = mm.index + 2; ft = ft.slice(0, at) + ft.slice(at + 1); fl = fl.slice(0, at) + fl.slice(at + 1); }
+    const fx = fixDigits(ft); if (fx.length === ft.length) ft = fx;
+    lines.push({ b: bx.b, t: ft, c, low: fl, raw: t });
   });
   post({ type: 'page', id: m.id, w: W, h: H, skew, skew2, vl, lines });
 }
@@ -347,7 +424,7 @@ async function page(m) {
 self.onmessage = async (e) => {
   const m = e.data;
   try {
-    if (m.type === 'init') { await init(m.base); post({ type: 'ready' }); }
+    if (m.type === 'init') { await init(m.base, m.model, m.over); post({ type: 'ready', model: m.model || 'ot2' }); }
     else if (m.type === 'page') await page(m);
   } catch (err) { post({ type: 'error', id: m.id, message: String(err && err.message || err) }); }
 };

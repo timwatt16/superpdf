@@ -1,5 +1,11 @@
 Super PDF — Thai OCR components
 - ONNX Runtime Web 1.30.0 (ort.wasm.min.mjs, ort-wasm-simd-threaded.*) — MIT License, (c) Microsoft Corporation
-- PP-OCRv5 mobile text detection (det.onnx) and th_PP-OCRv5_mobile_rec Thai recognition (rec_th.onnx, dict_th.txt)
-  from PaddleOCR (PaddlePaddle) — Apache License 2.0; ONNX conversions as published by the community
+- OpenThai2.0-OCR-Text (iApp Technology), https://huggingface.co/iapp/OpenThai2.0-OCR-Text — Apache License 2.0
+  det_ot2.onnx = det.onnx, rec_ot2.onnx = rec.onnx, dict_ot2.txt = rec_dict.txt (unmodified).
+  The model's own NOTICE: This model includes or is derived from the following Apache-2.0 licensed work:
+  PP-OCRv6_tiny_det, PP-OCRv6_tiny_rec, th_PP-OCRv5_mobile_rec (character list), Copyright (c) PaddlePaddle Authors,
+  https://huggingface.co/PaddlePaddle. det.onnx is PP-OCRv6_tiny_det as distributed. rec.onnx is a fine-tune of
+  PP-OCRv6_tiny_rec with a replaced Thai classifier, trained by iApp.
+  Super PDF's own pre/post-processing (worker) re-implements the published settings; iApp's Python runtime is not included.
 - words_th.txt.gz: Thai word list from PyThaiNLP (pythainlp/corpus/words_th.txt) — CC0-1.0 public domain
+Apache License 2.0: http://www.apache.org/licenses/LICENSE-2.0
