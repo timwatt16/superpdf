@@ -16,7 +16,7 @@ const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&
 // ------------------------------------------------------------------ state
 const sources = new Map();   // id -> { id, name, bytes, pdf (pdfjs doc), password, blank }
 const docs = [];             // tabs: { id, name, pages:[{uid,src,index,rot}], selected:Set, lastClicked, undo:[], redo:[], dirty, scroll:{} }
-const APP_VERSION = '1.9.6';   // shown at the top-left (#appVer) — change here and in index.html when releasing
+const APP_VERSION = '1.9.8';   // shown at the top-left (#appVer) — change here and in index.html when releasing
 let D = null;                // active doc
 let mode = 'organize';
 let host = { host: false };
@@ -948,7 +948,10 @@ const typingInField = () => { const a = document.activeElement; return a && (a.t
 const modalOpen = () => !$('modal').classList.contains('hidden') || sigOverlayOpen();
 let pendingCut = false, copyHandled = false, pasteHandled = false;
 document.addEventListener('copy', (e) => {
-  if (typingInField() || modalOpen() || !D.selected.size) return;
+  if (typingInField() || modalOpen()) return;
+  const ts = textSel(); // v1.9.7: text selected on a page -> copy that text (cleaned)
+  if (ts) { e.clipboardData.setData('text/plain', ts.text); e.preventDefault(); toast('คัดลอกข้อความแล้ว', 'ok', [], 1500); return; }
+  if (!D.selected.size) return;
   copyHandled = true;
   if (doCopy(pendingCut)) { e.clipboardData.setData('text/plain', clip.marker); e.preventDefault(); }
   pendingCut = false;
@@ -1321,6 +1324,7 @@ document.addEventListener('contextmenu', (e) => {
     const L = annEl2.closest('.annlayer'); const p = D.pages[+L.dataset.i];
     selectAnn({ uid: p.uid, id: annEl2.dataset.id });
     if (annEl2.classList.contains('annimg')) { showMenu(sigAnnMenu(), e.clientX, e.clientY); return; }
+    if (annEl2.classList.contains('annmark')) { showMenu(markMenu(findAnn(annSel)), e.clientX, e.clientY); return; }
     showMenu([
       { label: 'แก้ไขข้อความ', icon: 'text', kbd: 'Enter', action: startEdit },
       { sep: true },
@@ -1344,7 +1348,7 @@ document.addEventListener('contextmenu', (e) => {
     const u = D.pages[idx].uid;
     if (!D.selected.has(u)) { D.selected = new Set([u]); D.lastClicked = u; paintSelection(); }
     const L2 = !card && rpage.querySelector('.annlayer');
-    showMenu(L2 ? [...sigPointMenu(L2, e), { sep: true }, ...pageMenu(idx)] : pageMenu(idx), e.clientX, e.clientY);
+    showMenu(L2 ? [...textMenuItems(rpage, idx), ...sigPointMenu(L2, e), { sep: true }, ...pageMenu(idx)] : pageMenu(idx), e.clientX, e.clientY);
   } else if (e.target.closest('#organize, #reader')) {
     showMenu(emptyAreaMenu(), e.clientX, e.clientY);
   }
@@ -1718,6 +1722,7 @@ const readerObserver = new IntersectionObserver((entries) => {
     if (en.isIntersecting) paintReaderPage(en.target);
     else if (en.target.dataset.painted) { // free memory of pages far away (important on iPhone)
       en.target.querySelectorAll('canvas').forEach((c) => { c.width = c.height = 0; c.remove(); });
+      en.target.querySelector('.tlwrap')?.remove();
       delete en.target.dataset.painted;
     }
   }
@@ -1777,6 +1782,7 @@ async function paintReaderPage(d) {
   const c = await renderPageCanvas(p, sc, false);
   if (!d.dataset.painted || !d.isConnected) { c.width = c.height = 0; return; }
   d.insertBefore(c, d.firstChild);
+  buildTextLayer(d, p);   // v1.9.7: selectable text
 }
 async function renderPageCanvas(p, scale, withAnnots = true) {
   const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
@@ -1900,6 +1906,7 @@ function annMetrics(a) { // in pt
 }
 // draw annotation text onto a 2D context already scaled so that 1 unit = 1 pt of base space
 function paintAnn(g, a) {
+  if (a.kind === 'mark') { paintMark(g, a); return null; }
   if (a.kind === 'img') { // signature / stamp picture
     const im = sigFinal(a);
     if (im) { g.save(); g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high'; g.translate(a.x, a.y); if (a.r) g.rotate(a.r * Math.PI / 180); g.drawImage(im, 0, 0, a.w, a.h); g.restore(); }
@@ -1938,6 +1945,7 @@ async function embedAnnots(out, pdfPage, p) {
   const R = pg.rotate || 0;
   for (const a of p.annots) {
     if (a.kind === 'img') { await embedSigAnn(out, pdfPage, a, vb, R); continue; }
+    if (a.kind === 'mark') { embedMark(pdfPage, a, vb); continue; }
     if (!a.text || !a.text.trim()) continue;
     const m = annMetrics(a), K = 4;
     const c = document.createElement('canvas'); c.width = Math.ceil(m.w * K); c.height = Math.ceil(m.h * K);
@@ -1990,6 +1998,7 @@ function renderAnnLayer(L) {
   L.classList.toggle('tool', annTool);
   L.replaceChildren(...(p.annots || []).map((a) => {
     if (a.kind === 'img') return sigAnnEl(a, s, !!(annSel && annSel.id === a.id));
+    if (a.kind === 'mark') return markEl(a, s, !!(annSel && annSel.id === a.id));
     const el = document.createElement('div');
     el.className = 'annot' + (annSel && annSel.id === a.id ? ' selected' : '');
     el.dataset.id = a.id;
@@ -2010,6 +2019,7 @@ function selectAnn(sel, edit = false) {
 function annEl(sel) { return sel && document.querySelector(`.annlayer .annot[data-id="${sel.id}"]`); }
 function startEdit() {
   if ((findAnn(annSel) || {}).kind === 'img') { sigOpenProps(); return; }
+  if ((findAnn(annSel) || {}).kind === 'mark') return;
   const el = annEl(annSel); if (!el) return;
   const a = findAnn(annSel);
   annEditing = true;
@@ -2057,10 +2067,15 @@ function annPoint(L, e) { // pointer -> pt in base space (handles page rotation)
 }
 $('readerPages').addEventListener('pointerdown', (e) => {
   const L = e.target.closest('.annlayer');
-  if (!L || e.button !== 0) return;
+  if (!L) { // v1.9.7: the page itself (text layer) — text selection; just drop the box selection
+    if (e.button === 0 && e.target.closest('.rpage')) { if (annEditing) document.activeElement.blur(); if (annSel) { selectAnn(null); sigCloseProps(); } }
+    return;
+  }
+  if (e.button !== 0) return;
   const p = D.pages[+L.dataset.i];
   const el = e.target.closest('.annot');
   if (el && el.classList.contains('editing')) return;            // let the caret move
+  if (el && el.classList.contains('annmark')) { e.preventDefault(); try { getSelection().removeAllRanges(); } catch {} selectAnn({ uid: p.uid, id: el.dataset.id }); return; }
   if (el && el.classList.contains('annimg')) { sigPointerDown(e, L, p, el); return; }
   if (!el) {
     if (annEditing) { document.activeElement.blur(); }
@@ -2133,7 +2148,7 @@ function copyAnn(cut) {
   annClip = { ann: { ...a }, marker: 'SuperPDF-text-' + (seq++) };
   try { navigator.clipboard.writeText(annClip.marker).catch(() => {}); } catch {}
   if (cut) deleteAnn();
-  const what = a.kind === 'img' ? sigKindName(a.sk) : 'กล่องข้อความ';
+  const what = a.kind === 'img' ? sigKindName(a.sk) : a.kind === 'mark' ? MARK_NAMES[a.mt] : 'กล่องข้อความ';
   toast(cut ? `ตัด${what}แล้ว` : `คัดลอก${what}แล้ว — กด Ctrl+V เพื่อวาง (วางหน้าอื่น/แท็บอื่นได้)`, '', [], 2500);
 }
 function currentReaderPage() {
@@ -2163,7 +2178,7 @@ function pasteAnn(textOverride) {
 function applyAnnStyle(patch) {
   Object.assign(annDefaults, patch);
   const a = findAnn(annSel);
-  if (a && a.kind !== 'img') { pushUndo(); Object.assign(a, patch); touchPage(pageByUid(annSel.uid)); annEditing = false; refresh(); }
+  if (a && !a.kind) { pushUndo(); Object.assign(a, patch); touchPage(pageByUid(annSel.uid)); annEditing = false; refresh(); }
   updateAnnBar();
 }
 function setAnnTool(on) { annTool = on; if (on && mode !== 'read') setMode('read'); renderAllAnnLayers(); updateAnnBar(); }
@@ -2172,7 +2187,7 @@ function setAnnTool(on) { annTool = on; if (on && mode !== 'read') setMode('read
 function updateAnnBar() {
   const bar = $('annbar'); if (!bar) return;
   bar.classList.toggle('hidden', mode !== 'read' || !D.pages.length);
-  const a0 = findAnn(annSel), a = (a0 && a0.kind !== 'img' && a0) || annDefaults;
+  const a0 = findAnn(annSel), a = (a0 && !a0.kind && a0) || annDefaults;
   $('annTool').classList.toggle('active', annTool);
   if (mode !== 'read') { sigClosePanel(); sigCloseProps(); } else sigPropsSync();
   if (document.activeElement !== $('annFont')) {
@@ -2186,7 +2201,7 @@ function updateAnnBar() {
   const has = !!findAnn(annSel);
   for (const id of ['annDel', 'annCopy', 'annCut', 'annDup']) $(id).disabled = !has;
   $('annPaste').disabled = !annClip;
-  $('annHint').textContent = annTool ? 'คลิกบนหน้าเพื่อวางข้อความ' : (a0 && a0.kind === 'img') ? 'ลากเพื่อย้าย · ลากปุ่มมุมขวาล่างเพื่อย่อ-ขยาย/หมุน · ⋯ = สี/ความหนา' : has ? 'ลากเพื่อย้าย · คลิกอีกครั้ง/ดับเบิลคลิกเพื่อแก้ข้อความ' : IS_TOUCH ? '' : 'คลิกขวาบนหน้า = วางลายเซ็น/ตรา/วันที่ตรงจุดนั้น';
+  $('annHint').textContent = annTool ? 'คลิกบนหน้าเพื่อวางข้อความ' : (a0 && a0.kind === 'mark') ? `${MARK_NAMES[a0.mt]} · Delete = ลบ · คลิกขวา = คัดลอก/เปลี่ยนสี` : (a0 && a0.kind === 'img') ? 'ลากเพื่อย้าย · ลากปุ่มมุมขวาล่างเพื่อย่อ-ขยาย/หมุน · ⋯ = สี/ความหนา' : has ? 'ลากเพื่อย้าย · คลิกอีกครั้ง/ดับเบิลคลิกเพื่อแก้ข้อความ' : IS_TOUCH ? 'แตะค้างบนข้อความเพื่อเลือก/คัดลอก' : 'ลากบนข้อความ = เลือก/คัดลอก/ไฮไลต์ · Ctrl+F = ค้นหา · คลิกขวาบนหน้า = ลายเซ็น/ตรา/วันที่';
   $('annUndo').disabled = !D.undo.length; $('annRedo').disabled = !D.redo.length;
 }
 async function loadFontList() {
@@ -2875,6 +2890,7 @@ async function buildPdfInner(list, quiet = false) {
     const pg = copied.get(p.src + ':' + p.index).shift();
     out.addPage(pg);
     if (p.annots && p.annots.length) await embedAnnots(out, pg, p);
+    if (TXT.ocr.has(pkey(p))) await embedOcrText(out, pg, p);
     if (p.rot) pg.setRotation(degrees((pg.getRotation().angle + p.rot) % 360));
   }
   out.setProducer('Super PDF'); out.setCreator('Super PDF');
@@ -3113,7 +3129,12 @@ window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && ctxEl) { closeMenu(); return; }
   if (typingInField()) return;
   const c = e.ctrlKey || e.metaKey, k = e.key.toLowerCase();
-  if (c && (k === 'c' || k === 'x') && !e.shiftKey && !e.altKey) { if (D.selected.size) { e.preventDefault(); menuCopy(k === 'x'); } }
+  if (c && (k === 'c' || k === 'x') && !e.shiftKey && !e.altKey) { if (textSel()) { if (k === 'c') return; e.preventDefault(); } else if (D.selected.size) { e.preventDefault(); menuCopy(k === 'x'); } }
+  else if (c && k === 'f' && D.pages.length) { e.preventDefault(); openFind(textSel()?.text.split('\n')[0].slice(0, 80)); }
+  else if (e.key === 'F3' && D.pages.length) { e.preventDefault(); if ($('findbar').classList.contains('hidden')) openFind(); else stepFind(e.shiftKey ? -1 : 1); }
+  else if (c && k === 'a' && mode === 'read') { e.preventDefault(); selectPageText(readerPageIndex()); }
+  else if (e.key === 'Escape' && mode === 'read' && textSel()) { getSelection().removeAllRanges(); hideSelPop(); }
+  else if (e.key === 'Escape' && !$('findbar').classList.contains('hidden')) closeFind();
   else if (c && k === 'v') { pasteHandled = false; setTimeout(() => { if (!pasteHandled) pasteAny(); }, 120); }
   else if (c && k === 's') { e.preventDefault(); saveAll(e.shiftKey); }
   else if (c && k === 'o') { e.preventDefault(); doOpen(); }
@@ -4276,8 +4297,8 @@ function sigPointMenu(L, ev) {
   const cancel = () => { if (st) { st = null; clearTimeout(timer); } };
   $('readerPages').addEventListener('pointerdown', (e) => {
     if (e.pointerType !== 'touch' || mode !== 'read' || annTool) return;
-    const L = e.target.closest('.annlayer');
-    if (!L || e.target.closest('.annot')) return;
+    const rp = e.target.closest('.rpage'), L = rp && rp.querySelector('.annlayer');
+    if (!L || e.target.closest('.annot') || e.target.closest('.textLayer span, .textLayer br')) return; // on text: the phone's own text selection
     st = { x: e.clientX, y: e.clientY, L };
     clearTimeout(timer);
     timer = setTimeout(() => {
@@ -4990,7 +5011,7 @@ window.addEventListener('keydown', (e) => {
 
 
 // ------------------------------------------------------------------ v1.9 scanned pages -> Word (Thai OCR, offline)
-// worker: web/ocr/ocr-worker.js (onnxruntime-web, PP-OCRv5 detection + Thai recognition). Page structure rules and the
+// worker: web/ocr/ocr-worker.js (onnxruntime-web; v1.9.8: iApp OpenThai2.0-OCR-Text detection + Thai recognition). Page structure rules and the
 // .docx writer live here. Form-like pages (many ruled boxes) are inserted as pictures; words the model was unsure of
 // are highlighted yellow so they are quick to check.
 const OCRW = { worker: null, ready: null, seq: 0, wait: new Map() };
@@ -5339,7 +5360,7 @@ async function convertScanWord() {
       <ul class="hint"><li>ย่อหน้า หัวข้อ และตารางตัวเลข (เช่น งบการเงิน) จะแก้ไขได้ใน Word</li>
       <li>หน้าที่เป็นแบบฟอร์มช่องกรอกจำนวนมาก (เช่น ภ.ง.ด.) จะแทรกเป็นภาพหน้าเดิม</li>
       <li>คำที่ระบบอ่านไม่มั่นใจจะ<b style="background:#ff0">ไฮไลต์สีเหลือง</b> — ควรตรวจทานก่อนใช้</li></ul>
-      <p class="hint">ใช้เวลาประมาณหน้าละ 10–30 วินาที${IS_TOUCH ? ' (บนมือถืออาจนานกว่านี้)' : ''} · ครั้งแรกต้องโหลดตัวอ่านข้อความประมาณ 16 MB</p>
+      <p class="hint">ใช้เวลาประมาณหน้าละ 5–15 วินาที${IS_TOUCH ? ' (บนมือถืออาจนานกว่านี้)' : ''} · ครั้งแรกต้องโหลดตัวอ่านข้อความประมาณ 8 MB</p>
       <label class="radio"><input type="checkbox" name="noform"> แปลงทุกหน้าเป็นข้อความ (ไม่แทรกหน้าแบบฟอร์มเป็นภาพ)</label>`,
     buttons: [['cancel', 'ยกเลิก'], ['ok', 'เริ่มแปลง', true]],
   });
@@ -5389,8 +5410,495 @@ async function convertScanWord() {
 }
 
 
+
+// ------------------------------------------------------------------ v1.9.7 select text / copy / highlight / find / OCR text layer
+// Reader pages get a pdf.js text layer (.tlwrap > .textLayer) with the same geometry as .annlayer (base orientation,
+// rotated by p.rot). Scanned pages can get an OCR text layer (TXT.ocr) so they can be selected / searched too, and that
+// text is saved into the PDF as invisible text (exe: needs fontkit). Highlights are annotations { kind: 'mark' }.
+const TXT = { tc: new Map(), ocr: new Map() };   // 'src:index' -> Promise<textContent> ; 'src:index' -> [{ t, x, y, w, h }] (pt, base space)
+const pkey = (p) => p.src + ':' + p.index;
+const MARK_COLORS = { hl: ['#ffe14d', '#8be28b', '#ff9ccf', '#8fd0ff'], ul: '#1466e0', st: '#d92d20' };
+const SP = { saved: null, timer: 0, down: false, hl: '#ffe14d' };
+try { const c = localStorage.getItem('superpdf.hl'); if (c) SP.hl = c; } catch {}
+
+function pageTextContent(p) {
+  const k = pkey(p);
+  if (!TXT.tc.has(k)) TXT.tc.set(k, sources.get(p.src).pdf.getPage(p.index + 1).then((pg) => pg.getTextContent()).catch(() => ({ items: [] })));
+  return TXT.tc.get(k);
+}
+const hasRealText = (tc) => tc.items.some((it) => it.str && it.str.trim());
+async function pageStrings(p) { // text pieces of a page (PDF text, else OCR lines), newline marks kept
+  const o = TXT.ocr.get(pkey(p));          // OCR asked for by the user wins (e.g. PDFs whose Thai text copies as garbage)
+  if (o) return o.map((l) => l.t + '\n');
+  const tc = await pageTextContent(p);
+  return hasRealText(tc) ? tc.items.filter((it) => it.str !== undefined).map((it) => it.str + (it.hasEOL ? '\n' : '')) : [];
+}
+function cleanSelText(t) {
+  return t.replace(/\u0000/g, '').replace(/ํา/g, 'ำ').replace(/[ \t ]+\n/g, '\n').replace(/\n[ \t]+/g, '\n')
+    .replace(/\n{3,}/g, '\n\n').replace(/[  ]{2,}/g, ' ').trim();
+}
+async function copyText(t, what = 'ข้อความ') {
+  t = cleanSelText(t);
+  if (!t) { toast('ไม่มีข้อความให้คัดลอก'); return; }
+  let ok = false;
+  try { await navigator.clipboard.writeText(t); ok = true; } catch {}
+  if (!ok) {
+    const ta = document.createElement('textarea'); ta.value = t; ta.style.cssText = 'position:fixed;left:-9999px;top:0';
+    document.body.appendChild(ta); ta.focus(); ta.select();
+    try { ok = document.execCommand('copy'); } catch {}
+    ta.remove();
+  }
+  toast(ok ? `คัดลอก${what}แล้ว (${t.length.toLocaleString()} ตัวอักษร) — วางในแอปอื่นได้เลย` : 'คัดลอกไม่สำเร็จ', ok ? 'ok' : 'err', [], 2500);
+}
+
+// ---- text layer per painted reader page
+async function buildTextLayer(d, p) {
+  const L = d.querySelector('.annlayer'); if (!L) return;
+  d.querySelector('.tlwrap')?.remove();
+  const s = +d.dataset.scale;
+  const W = document.createElement('div'); W.className = 'tlwrap';
+  W.style.cssText = L.style.cssText; W.dataset.i = L.dataset.i;
+  const tl = document.createElement('div'); tl.className = 'textLayer';
+  W.appendChild(tl);
+  d.insertBefore(W, L);
+  let strs = [], divs = [], ocr = false;
+  try {
+    const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
+    const tc = await pageTextContent(p);
+    if (!W.isConnected) return;
+    if (hasRealText(tc) && !TXT.ocr.has(pkey(p))) {
+      tl.style.setProperty('--scale-factor', s);
+      const layer = new pdfjsLib.TextLayer({ textContentSource: tc, container: tl, viewport: pg.getViewport({ scale: s, rotation: pg.rotate }) });
+      await layer.render();
+      strs = layer.textContentItemsStr; divs = layer.textDivs;
+    } else if (TXT.ocr.has(pkey(p))) {
+      ocr = true; tl.classList.add('ocr');
+      for (const l of TXT.ocr.get(pkey(p))) {
+        const sp = document.createElement('span');
+        const fs = Math.max(4, l.h * s * 0.92);
+        sp.textContent = l.t;
+        Object.assign(sp.style, { left: l.x * s + 'px', top: l.y * s + 'px', fontSize: fs + 'px', fontFamily: 'sans-serif' });
+        mctx.font = `${fs}px sans-serif`;
+        const mw = mctx.measureText(l.t).width;
+        if (mw > 0) sp.style.transform = `scaleX(${(l.w * s) / mw})`;
+        tl.appendChild(sp); tl.appendChild(document.createElement('br'));
+        strs.push(l.t); divs.push(sp);
+      }
+    }
+  } catch (e) { console.warn('text layer', e); }
+  const end = document.createElement('div'); end.className = 'endOfContent'; tl.appendChild(end);
+  W.__txt = { strs, divs, ocr };
+  d.classList.toggle('notext', !strs.join('').trim());
+  if (FIND.nq) drawFindHits(W);
+}
+
+// ---- selection
+const nodeEl = (x) => (x && x.nodeType === 1 ? x : x && x.parentElement);
+function textSel() { // current selection inside the reader's text layers -> { range, text } | null
+  const s = getSelection();
+  if (!s || s.isCollapsed || !s.rangeCount || mode !== 'read') return null;
+  const r = s.getRangeAt(0);
+  if (!nodeEl(r.startContainer)?.closest('#readerPages') || !(nodeEl(r.startContainer)?.closest('.textLayer') || nodeEl(r.endContainer)?.closest('.textLayer'))) return null;
+  const text = cleanSelText(s.toString());
+  return text ? { range: r.cloneRange(), text } : null;
+}
+function textRectsOf(range, root) { // client rects of the selected characters only (not of whole elements)
+  const res = [];
+  const tw = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  for (let n; (n = tw.nextNode());) {
+    if (!n.data.length || !range.intersectsNode(n) || !nodeEl(n).closest('.textLayer')) continue;
+    const r = document.createRange(); r.selectNodeContents(n);
+    if (n === range.startContainer) r.setStart(n, range.startOffset);
+    if (n === range.endContainer) r.setEnd(n, range.endOffset);
+    for (const q of r.getClientRects()) if (q.width > 0.5 && q.height > 0.5) res.push(q);
+  }
+  return res;
+}
+function clientRectToBase(L, q) { // screen rect -> [x, y, w, h] in base pt of that page
+  const [x0, y0] = annPoint(L, { clientX: q.left, clientY: q.top }), [x1, y1] = annPoint(L, { clientX: q.right, clientY: q.bottom });
+  return [Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0)];
+}
+function mergeRects(rs) { // join pieces of the same line
+  rs = rs.slice().sort((a, b) => (a[1] + a[3] / 2) - (b[1] + b[3] / 2) || a[0] - b[0]);
+  const out = [];
+  for (const r of rs) {
+    const o = out.find((q) => Math.abs((q[1] + q[3] / 2) - (r[1] + r[3] / 2)) < Math.min(q[3], r[3]) * 0.5 &&
+      r[0] <= q[0] + q[2] + Math.max(q[3], r[3]) * 0.6 && r[0] + r[2] >= q[0] - Math.max(q[3], r[3]) * 0.6);
+    if (!o) { out.push(r.slice()); continue; }
+    const x0 = Math.min(o[0], r[0]), y0 = Math.min(o[1], r[1]), x1 = Math.max(o[0] + o[2], r[0] + r[2]), y1 = Math.max(o[1] + o[3], r[1] + r[3]);
+    o[0] = x0; o[1] = y0; o[2] = x1 - x0; o[3] = y1 - y0;
+  }
+  return out.map((r) => r.map((v) => Math.round(v * 100) / 100));
+}
+function selRectsByPage(range) {
+  const by = new Map();
+  for (const W of document.querySelectorAll('#readerPages .tlwrap')) {
+    if (!range.intersectsNode(W)) continue;
+    const L = W.parentElement.querySelector('.annlayer'); if (!L) continue;
+    const rs = textRectsOf(range, W).map((q) => clientRectToBase(L, q));
+    if (rs.length) by.set(+W.dataset.i, mergeRects(rs));
+  }
+  return by;
+}
+function addMark(mt, color) {
+  const sel = textSel() || SP.saved; if (!sel) return;
+  const by = selRectsByPage(sel.range);
+  if (!by.size) { toast('เลือกข้อความก่อน แล้วจึงไฮไลต์'); return; }
+  if (mt === 'hl') { SP.hl = color || SP.hl; try { localStorage.setItem('superpdf.hl', SP.hl); } catch {} }
+  pushUndo();
+  for (const [i, rects] of by) {
+    const p = D.pages[i]; if (!p) continue;
+    const x = Math.min(...rects.map((r) => r[0])), y = Math.min(...rects.map((r) => r[1]));
+    const a = { id: annId(), kind: 'mark', mt, color: mt === 'hl' ? SP.hl : (color || MARK_COLORS[mt]), x, y,
+      rects: rects.map((r) => [r[0] - x, r[1] - y, r[2], r[3]]), text: sel.text };
+    p.annots = [...(p.annots || []), a]; touchPage(p);
+  }
+  try { getSelection().removeAllRanges(); } catch {}
+  SP.saved = null; hideSelPop(); annSel = null;
+  refresh();
+}
+const MARK_NAMES = { hl: 'ไฮไลต์', ul: 'ขีดเส้นใต้', st: 'ขีดฆ่า' };
+function markEl(a, s, selected) {
+  const el = document.createElement('div');
+  el.className = `annot annmark ${a.mt}${selected ? ' selected' : ''}`;
+  el.dataset.id = a.id;
+  el.style.left = a.x * s + 'px'; el.style.top = a.y * s + 'px';
+  el.style.setProperty('--c', a.color);
+  for (const [x, y, w, h] of a.rects) {
+    const m = document.createElement('div'); m.className = 'mk';
+    Object.assign(m.style, { left: x * s + 'px', top: y * s + 'px', width: w * s + 'px', height: h * s + 'px' });
+    m.title = `${MARK_NAMES[a.mt]}: ${(a.text || '').slice(0, 80)}\nคลิกขวา = คัดลอก/เปลี่ยนสี/ลบ`;
+    el.appendChild(m);
+  }
+  return el;
+}
+const markLine = (mt, y, h) => { const t = Math.max(0.6, h * 0.075); return mt === 'ul' ? [y + h - t, t] : [y + h * 0.56 - t / 2, t]; };
+function paintMark(g, a) { // base-pt context
+  g.save(); g.translate(a.x, a.y); g.fillStyle = a.color;
+  if (a.mt === 'hl') g.globalCompositeOperation = 'multiply';
+  for (const [x, y, w, h] of a.rects) {
+    if (a.mt === 'hl') g.fillRect(x, y, w, h);
+    else { const [ly, t] = markLine(a.mt, y, h); g.fillRect(x, ly, w, t); }
+  }
+  g.restore();
+}
+function hexRgb(h) { const n = parseInt(String(h).replace('#', ''), 16) || 0; return window.PDFLib.rgb((n >> 16 & 255) / 255, (n >> 8 & 255) / 255, (n & 255) / 255); }
+function embedMark(pdfPage, a, vb) {
+  const col = hexRgb(a.color);
+  const box = (x, y, w, h) => {
+    const [px0, py0] = vb.convertToPdfPoint(a.x + x, a.y + y), [px1, py1] = vb.convertToPdfPoint(a.x + x + w, a.y + y + h);
+    return { x: Math.min(px0, px1), y: Math.min(py0, py1), width: Math.abs(px1 - px0), height: Math.abs(py1 - py0) };
+  };
+  for (const [x, y, w, h] of a.rects) {
+    try {
+      if (a.mt === 'hl') pdfPage.drawRectangle({ ...box(x, y, w, h), color: col, blendMode: window.PDFLib.BlendMode.Multiply });
+      else { const [ly, t] = markLine(a.mt, y, h); pdfPage.drawRectangle({ ...box(x, ly, w, t), color: col }); }
+    } catch (e) { console.warn('mark', e); }
+  }
+}
+
+// ---- floating menu over a selection
+function hideSelPop() { $('selpop').classList.add('hidden'); }
+function showSelPop() {
+  const sel = SP.down ? null : textSel();
+  if (!sel || modalOpen()) { hideSelPop(); return; }
+  SP.saved = sel;
+  const rs = textRectsOf(sel.range, $('readerPages'));
+  if (!rs.length) { hideSelPop(); return; }
+  const pop = $('selpop'); pop.classList.remove('hidden');
+  pop.querySelectorAll('.dot').forEach((b) => b.classList.toggle('on', b.dataset.c === SP.hl));
+  const last = rs[rs.length - 1], first = rs[0], w = pop.offsetWidth, h = pop.offsetHeight;
+  let top = last.bottom + 10;
+  if (top + h > innerHeight - 8) top = first.top - h - 10;
+  if (top < 60) top = Math.min(innerHeight - h - 8, last.bottom + 10);
+  pop.style.top = Math.max(8, top) + 'px';
+  pop.style.left = Math.max(8, Math.min(innerWidth - w - 8, (IS_TOUCH ? (first.left + last.right) / 2 : last.right) - w / 2)) + 'px';
+}
+document.addEventListener('selectionchange', () => {
+  clearTimeout(SP.timer);
+  if (SP.down) return;
+  SP.timer = setTimeout(showSelPop, IS_TOUCH ? 300 : 150);
+});
+$('readerPages').addEventListener('pointerdown', (e) => {
+  hideSelPop();
+  const tl = e.target.closest('.textLayer');
+  // mouse: a new press starts a new selection (otherwise Chrome drags the old selected text / keeps it on blank areas)
+  if (e.pointerType !== 'touch' && e.button === 0 && !e.shiftKey && !e.target.closest('.annot')) { try { getSelection().removeAllRanges(); } catch {} }
+  if (tl && e.button === 0) { tl.classList.add('selecting'); if (e.pointerType !== 'touch') SP.down = true; }
+}, true);
+window.addEventListener('pointerup', () => {
+  document.querySelectorAll('.textLayer.selecting').forEach((x) => x.classList.remove('selecting'));
+  if (SP.down) { SP.down = false; clearTimeout(SP.timer); SP.timer = setTimeout(showSelPop, 30); }
+});
+(() => { // hide while scrolling, show again when it stops
+  let t = 0;
+  $('reader').addEventListener('scroll', () => { if ($('selpop').classList.contains('hidden') && !t) return; hideSelPop(); clearTimeout(t); t = setTimeout(() => { t = 0; showSelPop(); }, 250); }, { passive: true });
+})();
+$('selpop').addEventListener('mousedown', (e) => e.preventDefault()); // keep the selection
+$('selpop').addEventListener('click', (e) => {
+  const b = e.target.closest('button'); if (!b) return;
+  const sel = textSel() || SP.saved; if (!sel) { hideSelPop(); return; }
+  const a = b.dataset.a;
+  if (a === 'copy') { copyText(sel.text); hideSelPop(); }
+  else if (a === 'hl') addMark('hl', b.dataset.c || SP.hl);
+  else if (a === 'ul' || a === 'st') addMark(a);
+  else if (a === 'find') { hideSelPop(); openFind(sel.text.split('\n')[0].slice(0, 80)); }
+});
+function selectPageText(i) {
+  const tl = $('readerPages').children[i]?.querySelector('.textLayer');
+  if (!tl || !tl.textContent.trim()) { toast('หน้านี้ไม่มีข้อความให้เลือก (อาจเป็นภาพสแกน — คลิกขวาที่หน้าแล้วเลือก "อ่านข้อความจากภาพ")', '', [], 6000); return; }
+  const r = document.createRange(); r.selectNodeContents(tl);
+  const s = getSelection(); s.removeAllRanges(); s.addRange(r);
+  clearTimeout(SP.timer); SP.timer = setTimeout(showSelPop, 30);
+}
+async function copyPageText(p) {
+  const strs = await pageStrings(p);
+  if (!strs.join('').trim()) { toast('หน้านี้ไม่มีข้อความ (อาจเป็นภาพสแกน)'); return; }
+  copyText(strs.join(''), 'ข้อความทั้งหน้า');
+}
+function readerPageIndex() { return Math.max(0, Math.min(D.pages.length - 1, (+$('pageInput').value || 1) - 1)); }
+// items for the reader's right-click menu
+function textMenuItems(rpage, idx) {
+  const items = [], sel = textSel();
+  if (sel) {
+    SP.saved = sel;
+    const short = sel.text.replace(/\s+/g, ' ').slice(0, 24) + (sel.text.length > 24 ? '…' : '');
+    items.push(
+      { label: 'คัดลอกข้อความ', icon: 'copy', kbd: 'Ctrl+C', action: () => copyText(sel.text) },
+      { label: 'ไฮไลต์', icon: 'hl', sub: MARK_COLORS.hl.map((c, k) => ({ label: ['สีเหลือง', 'สีเขียว', 'สีชมพู', 'สีฟ้า'][k], icon: 'hl', action: () => addMark('hl', c) })) },
+      { label: 'ขีดเส้นใต้', icon: 'ul', action: () => addMark('ul') },
+      { label: 'ขีดฆ่า', icon: 'st', action: () => addMark('st') },
+      { label: `ค้นหา “${short}”`, icon: 'search', action: () => openFind(sel.text.split('\n')[0].slice(0, 80)) },
+      { sep: true });
+  }
+  const W = rpage.querySelector('.tlwrap'), p = D.pages[idx];
+  const has = W && W.__txt && W.__txt.strs.join('').trim();
+  if (has) items.push(
+    { label: 'เลือกข้อความทั้งหน้า', icon: 'selall', kbd: 'Ctrl+A', action: () => selectPageText(idx) },
+    { label: 'คัดลอกข้อความทั้งหน้า', icon: 'copy', action: () => copyPageText(p) });
+  if (W && W.__txt) items.push({ label: W.__txt.ocr ? 'อ่านข้อความจากภาพใหม่ (OCR)…' : has ? 'อ่านข้อความจากภาพ (OCR) — ใช้เมื่อคัดลอกแล้วตัวอักษรเพี้ยน…' : 'อ่านข้อความจากภาพ (OCR) เพื่อเลือก/ค้นหา…', icon: 'scan', action: () => ocrTextDialog([p], !!W.__txt.ocr) });
+  items.push({ label: 'ค้นหาข้อความ…', icon: 'search', kbd: 'Ctrl+F', action: () => openFind() }, { sep: true });
+  return items;
+}
+function markMenu(a) {
+  const p = pageByUid(annSel.uid);
+  const recolor = (c) => { pushUndo(); a.color = c; touchPage(p); refresh(); };
+  return [
+    { label: 'คัดลอกข้อความ', icon: 'copy', disabled: !a.text, action: () => copyText(a.text || '') },
+    ...(a.mt === 'hl' ? [{ label: 'เปลี่ยนสี', icon: 'hl', sub: MARK_COLORS.hl.map((c, k) => ({ label: ['สีเหลือง', 'สีเขียว', 'สีชมพู', 'สีฟ้า'][k], icon: 'hl', action: () => recolor(c) })) }]
+      : [{ label: 'เปลี่ยนสี', icon: a.mt, sub: [['สีน้ำเงิน', '#1466e0'], ['สีแดง', '#d92d20'], ['สีดำ', '#000000'], ['สีเขียว', '#067647']].map(([l, c]) => ({ label: l, icon: a.mt, action: () => recolor(c) })) }]),
+    { sep: true },
+    { label: `ลบ${MARK_NAMES[a.mt]}`, icon: 'trash', kbd: 'Delete', danger: true, action: deleteAnn },
+  ];
+}
+
+// ---- find (Ctrl+F)
+const FIND = { q: '', nq: '', hits: [], cur: -1, seq: 0, scroll: false, noText: 0, busy: false };
+function normMap(s) { // remove spaces, lower-case, ํา -> ำ ; ms/me map each output char to [start, end) in s
+  let t = ''; const ms = [], me = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (/[\s​‌‍­\u0000]/.test(ch)) continue;
+    if (ch === 'ํ' && s[i + 1] === 'า') { t += 'ำ'; ms.push(i); me.push(i + 2); i++; continue; }
+    const l = ch.toLowerCase(); t += l.length === 1 ? l : ch; ms.push(i); me.push(i + 1);
+  }
+  return { t, ms, me };
+}
+function matchStarts(t, q) { const r = []; let i = 0; while (q && (i = t.indexOf(q, i)) >= 0) { r.push(i); i += q.length; } return r; }
+function openFind(q) {
+  if (!D.pages.length) return;
+  if (mode !== 'read') setMode('read');
+  $('findbar').classList.remove('hidden');
+  const inp = $('findInput');
+  if (q != null) inp.value = cleanSelText(q).replace(/\s+/g, ' ');
+  inp.focus(); inp.select();
+  if (inp.value.trim() && (normMap(inp.value).t !== FIND.nq || q != null)) runFind(inp.value);
+}
+function closeFind() {
+  $('findbar').classList.add('hidden'); FIND.seq++;
+  FIND.q = FIND.nq = ''; FIND.hits = []; FIND.cur = -1;
+  document.querySelectorAll('#readerPages .findhits').forEach((x) => x.remove());
+}
+async function runFind(q) {
+  const my = ++FIND.seq;
+  FIND.q = q; FIND.nq = normMap(q).t; FIND.hits = []; FIND.cur = -1; FIND.noText = 0;
+  document.querySelectorAll('#readerPages .findhits').forEach((x) => x.remove());
+  if (!FIND.nq) { updFindCount(); return; }
+  FIND.busy = true; updFindCount();
+  const start = readerPageIndex();
+  for (let i = 0; i < D.pages.length; i++) {
+    const strs = await pageStrings(D.pages[i]);
+    if (my !== FIND.seq) return;
+    const S = strs.join('');
+    if (!S.trim()) { FIND.noText++; continue; }
+    matchStarts(normMap(S).t, FIND.nq).forEach((_, k) => FIND.hits.push({ i, k }));
+    if (FIND.cur < 0 && FIND.hits.length && FIND.hits[FIND.hits.length - 1].i >= start) { FIND.cur = FIND.hits.findIndex((h) => h.i >= start); showFindHit(); }
+    if (i % 10 === 9) updFindCount();
+  }
+  FIND.busy = false;
+  if (FIND.cur < 0 && FIND.hits.length) { FIND.cur = 0; showFindHit(); }
+  updFindCount();
+  document.querySelectorAll('#readerPages .tlwrap').forEach(drawFindHits);
+}
+function updFindCount() {
+  const n = FIND.hits.length;
+  $('findCount').textContent = !FIND.nq ? '' : n ? `${FIND.cur + 1}/${n}${FIND.busy ? '…' : ''}` : FIND.busy ? 'กำลังค้นหา…' : 'ไม่พบ';
+  $('findCount').classList.toggle('none', !!FIND.nq && !n && !FIND.busy);
+  $('findPrev').disabled = $('findNext').disabled = !n;
+  const m = $('findMsg');
+  if (FIND.nq && !FIND.busy && FIND.noText) {
+    m.innerHTML = `${n ? '' : 'ไม่พบในข้อความของเอกสาร · '}มี ${FIND.noText} หน้าเป็นภาพสแกน <button class="linkbtn" id="findOcr">อ่านข้อความจากภาพ (OCR) แล้วค้นหาอีกครั้ง</button>`;
+    m.classList.remove('hidden');
+    $('findOcr').onclick = async () => {
+      const list = [];
+      for (const p of D.pages) if (!(await pageStrings(p)).join('').trim()) list.push(p);
+      if (await ocrTextDialog(list)) runFind($('findInput').value);
+    };
+  } else m.classList.add('hidden');
+}
+function showFindHit() {
+  const h = FIND.hits[FIND.cur]; if (!h) return;
+  updFindCount();
+  FIND.scroll = true;
+  const el = $('readerPages').children[h.i];
+  if (el) el.scrollIntoView({ block: 'start' });
+  document.querySelectorAll('#readerPages .tlwrap').forEach(drawFindHits);
+}
+function stepFind(dir) {
+  const n = FIND.hits.length; if (!n) { if ($('findInput').value.trim()) runFind($('findInput').value); return; }
+  FIND.cur = (FIND.cur + dir + n) % n; showFindHit();
+}
+function drawFindHits(W) {
+  W.querySelector('.findhits')?.remove();
+  if (!FIND.nq || !W.__txt || !W.isConnected) return;
+  const i = +W.dataset.i, { strs, divs } = W.__txt;
+  const starts = []; let o = 0; for (const s of strs) { starts.push(o); o += s.length; }
+  const N = normMap(strs.join('')), ms = matchStarts(N.t, FIND.nq);
+  if (!ms.length) return;
+  const L = W.parentElement.querySelector('.annlayer'); if (!L) return;
+  const s = +L.dataset.scale;
+  const box = document.createElement('div'); box.className = 'findhits';
+  W.appendChild(box);
+  const h = FIND.hits[FIND.cur], curK = h && h.i === i ? h.k : -1;
+  const locate = (pos) => { let j = 0; while (j + 1 < starts.length && starts[j + 1] <= pos) j++; return j; };
+  let curEl = null;
+  ms.forEach((m, k) => {
+    const a = N.ms[m], b = N.me[m + FIND.nq.length - 1];
+    const ja = locate(a), jb = locate(b - 1);
+    const na = divs[ja]?.firstChild, nb = divs[jb]?.firstChild; if (!na || !nb) return;
+    const r = document.createRange();
+    try { r.setStart(na, Math.min(na.length, a - starts[ja])); r.setEnd(nb, Math.min(nb.length, b - starts[jb])); } catch { return; }
+    for (const q of mergeRects(textRectsOf(r, W).map((q) => clientRectToBase(L, q)))) {
+      const e = document.createElement('div'); e.className = 'fh' + (k === curK ? ' cur' : '');
+      Object.assign(e.style, { left: (q[0] - 1) * s + 'px', top: (q[1] - 1) * s + 'px', width: (q[2] + 2) * s + 'px', height: (q[3] + 2) * s + 'px' });
+      box.appendChild(e);
+      if (k === curK && !curEl) curEl = e;
+    }
+  });
+  if (curEl && FIND.scroll) { FIND.scroll = false; curEl.scrollIntoView({ block: 'center', inline: 'nearest' }); }
+}
+(() => {
+  let t = 0;
+  $('findInput').addEventListener('input', () => { clearTimeout(t); t = setTimeout(() => runFind($('findInput').value), 280); });
+  $('findInput').addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (normMap($('findInput').value).t !== FIND.nq) { clearTimeout(t); runFind($('findInput').value); } else stepFind(e.shiftKey ? -1 : 1);
+    } else if (e.key === 'Escape') { e.preventDefault(); closeFind(); }
+    else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); $('findInput').select(); }
+  });
+  $('findNext').onclick = () => stepFind(1);
+  $('findPrev').onclick = () => stepFind(-1);
+  $('findClose').onclick = closeFind;
+  $('btnFind').onclick = () => ($('findbar').classList.contains('hidden') ? openFind() : closeFind());
+})();
+
+// ---- OCR text layer for scanned pages (uses the v1.9 Thai OCR worker)
+async function ocrPageLines(p) {
+  const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
+  const b = pg.getViewport({ scale: 1, rotation: pg.rotate });
+  const K = Math.min(200 / 72, Math.sqrt((IS_TOUCH ? 9e6 : 16e6) / (b.width * b.height)));
+  const vp = pg.getViewport({ scale: K, rotation: pg.rotate });
+  const c = document.createElement('canvas'); c.width = Math.floor(vp.width); c.height = Math.floor(vp.height);
+  const g = c.getContext('2d'); g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+  await pg.render({ canvasContext: g, viewport: vp }).promise;
+  const res = await ocrCanvas(c);
+  const W = c.width, H = c.height; c.width = c.height = 0;
+  // the worker may have straightened the page: rotate boxes back (output (x,y) came from R(skew)·(x-c)+c)
+  const t = Math.abs(res.skew || 0) > 0.25 ? res.skew * Math.PI / 180 : 0, co = Math.cos(t), si = Math.sin(t), cx = W / 2, cy = H / 2;
+  const back = (x, y) => [co * (x - cx) - si * (y - cy) + cx, si * (x - cx) + co * (y - cy) + cy];
+  return res.lines.filter((l) => l.t && l.t.trim()).map((l) => {
+    const [x0, y0, x1, y1] = l.b;
+    const pts = [back(x0, y0), back(x1, y0), back(x0, y1), back(x1, y1)];
+    const xs = pts.map((q) => q[0]), ys = pts.map((q) => q[1]);
+    const X0 = Math.min(...xs), Y0 = Math.min(...ys), X1 = Math.max(...xs), Y1 = Math.max(...ys);
+    // straightened box of the same size, centred where the tilted one is
+    const w = x1 - x0, h = y1 - y0, mx = (X0 + X1) / 2, my = (Y0 + Y1) / 2;
+    return { t: l.t.replace(/ํา/g, 'ำ'), x: (mx - w / 2) / K, y: (my - h / 2) / K, w: w / K, h: h / K };
+  }).sort((a, b2) => (Math.abs(a.y - b2.y) < Math.min(a.h, b2.h) * 0.5 ? a.x - b2.x : a.y - b2.y));
+}
+async function ocrTextDialog(list, redo = false) {
+  list = list.filter(Boolean);
+  if (!list.length) return false;
+  const r = await dialog({
+    title: 'อ่านข้อความจากภาพ (OCR)',
+    body: `<p>ทำให้หน้าสแกน ${list.length} หน้า <b>เลือก/คัดลอก/ค้นหาข้อความได้</b> เหมือนไฟล์ PDF ปกติ</p>
+      <ul class="hint"><li>ใช้ตัวอ่านข้อความภาษาไทยในเครื่อง ไม่ส่งเอกสารออกนอกเครื่อง</li>
+      <li>ใช้เวลาประมาณหน้าละ 5–15 วินาที${IS_TOUCH ? ' (บนมือถืออาจนานกว่านี้)' : ''} · ครั้งแรกต้องโหลดตัวอ่านประมาณ 8 MB</li>
+      <li>อาจอ่านผิดบ้าง ควรตรวจทานข้อความที่คัดลอกก่อนใช้</li>
+      <li>${host.host ? 'เมื่อบันทึก PDF ข้อความที่อ่านได้จะฝังไว้แบบมองไม่เห็น ทำให้ค้นหาไฟล์นี้ได้ในโปรแกรมอื่นด้วย' : 'เวอร์ชันเว็บ: ใช้เลือก/ค้นหาในโปรแกรมนี้ (การฝังข้อความลงไฟล์ใช้ได้ในโปรแกรมบน Windows)'}</li></ul>`,
+    buttons: [['cancel', 'ยกเลิก'], ['ok', redo ? 'อ่านใหม่' : 'เริ่มอ่าน', true]],
+  });
+  if (!r.btn) return false;
+  let cancelled = false, done = 0;
+  const t0 = Date.now();
+  const show = (msg) => {
+    busy(msg);
+    let c = $('busy').querySelector('.ocrcancel');
+    if (!c) { c = document.createElement('button'); c.className = 'tbtn ocrcancel'; c.textContent = 'ยกเลิก'; c.onclick = () => { cancelled = true; c.disabled = true; c.textContent = 'กำลังยกเลิก…'; }; $('busy').querySelector('.busybox').appendChild(c); }
+  };
+  const finish = () => { $('busy').querySelector('.ocrcancel')?.remove(); unbusy(); };
+  try {
+    show('กำลังเตรียมตัวอ่านข้อความภาษาไทย … (ครั้งแรกอาจใช้เวลาสักครู่)');
+    await ocrWorker();
+    for (let k = 0; k < list.length; k++) {
+      if (cancelled) break;
+      const eta = k ? Math.round((Date.now() - t0) / 1000 / k * (list.length - k)) : null;
+      show(`กำลังอ่านข้อความหน้า ${k + 1}/${list.length} …${eta != null ? ` (เหลือประมาณ ${eta >= 60 ? Math.round(eta / 60) + ' นาที' : eta + ' วินาที'})` : ''}`);
+      const p = list[k];
+      TXT.ocr.set(pkey(p), await ocrPageLines(p));
+      done++;
+      const i = D.pages.indexOf(p), d = i >= 0 && $('readerPages').children[i];
+      if (d && d.dataset.painted) buildTextLayer(d, p);
+    }
+    finish();
+    for (const dd of docs) if (dd.pages.some((p) => TXT.ocr.has(pkey(p)))) dd.dirty = true;
+    refresh();
+    toast(`${cancelled ? 'หยุดแล้ว — ' : ''}อ่านข้อความแล้ว ${done} หน้า — ลากเลือกข้อความบนหน้าเพื่อคัดลอก/ไฮไลต์ได้`, 'ok', [], 6000);
+    return done > 0;
+  } catch (e) { finish(); toast('อ่านข้อความไม่สำเร็จ: ' + e.message, 'err', [], 9000); return done > 0; }
+}
+// saved PDF: put OCR text in as invisible text so the file is searchable elsewhere (needs a real font -> exe / fontkit)
+async function embedOcrText(out, pdfPage, p) {
+  const lines = TXT.ocr.get(pkey(p)); if (!lines || !lines.length) return;
+  if (hasRealText(await pageTextContent(p))) return;
+  const font = await annPdfFont(out, { font: 'TH Sarabun New', bold: false, italic: false }); if (!font) return;
+  const pg = await sources.get(p.src).pdf.getPage(p.index + 1);
+  const vb = pg.getViewport({ scale: 1, rotation: pg.rotate }), R = pg.rotate || 0;
+  for (const l of lines) {
+    try {
+      const w1 = font.widthOfTextAtSize(l.t, 1); if (!(w1 > 0)) continue;
+      const size = Math.max(2, Math.min(l.h * 2.2, l.w / w1));
+      const [tx, ty] = vb.convertToPdfPoint(l.x, l.y + l.h * 0.8);
+      pdfPage.drawText(l.t, { x: tx, y: ty, size, font, opacity: 0, rotate: degrees(R) });
+    } catch {}
+  }
+}
+
+
 // expose for automated testing
-window.__superpdf = { cardCopyDialog, houseCopyDialog, composeCopyPage, composeCardPage, get scanState() { return scan; }, acceptScanPage, finishCrop, pasteAny, readPasteEvent, sniffExt, isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
+window.__superpdf = { TXT, FIND, textSel, addMark, openFind, closeFind, runFind, stepFind, selectPageText, copyPageText, ocrTextDialog, ocrPageLines, buildTextLayer, normMap, cleanSelText, cardCopyDialog, houseCopyDialog, composeCopyPage, composeCardPage, get scanState() { return scan; }, acceptScanPage, finishCrop, pasteAny, readPasteEvent, sniffExt, isHeic, heicToJpegBlob, loadImageEl, fileToPages, compressDialog, compressPdfBytes, cmpImages, COMPRESS_PRESETS, APP_VERSION, splitBySize, buildPdfInner, bundledFontsReady, BUNDLED_FONTS, IE, openImageEditor, closeImageEditor, iePickObject, ieDelete, ieApply, despeckleCanvas, despecklePages, ieSetSel, ieLift, ieCommit, ieOpenPaint, scan, openScanner, applyScanFilter, scanPagesToPdf, printDialog, enhancePages, get annDefaults() { return annDefaults; }, setAnnTool, convertTiff, pasteAny, textToPdf, get D() { return D; }, docs, get pages() { return D.pages; }, openAsTabs, insertFiles, buildPdf, setMode, switchTo, get clip() { return clip; }, SIG, SE, SD, sigStore, sigOpenPanel, sigPlace, sigAddToLibrary, sigOpenEditor, sigOpenDraw, sigEdStep, sigEdPick, sigEdEraseRect, sigEdDespeckle, sigEdResult, sigExport, sigImportFile, sigApplyProps, sigOpenProps, sigPointMenu, sigFinal, convertScanWord, ocrCanvas, owPageBlocks, owDocx, owIsForm, owFixNumbers, renderPageCanvas, get annSel() { return annSel; }, selectAnn, findAnn, undo, redo, gcSources, sources, thumbCache, canvasToBytes, saveBytes, loadImageEl, closeTab, doCopy, doPaste, get lastSave() { return lastSave; }, get host() { return host; }, set host(v) { host = v; } };
 
 if (IS_TOUCH) {
   document.querySelector('#dropcard h1').textContent = 'แตะเพื่อเลือกไฟล์';

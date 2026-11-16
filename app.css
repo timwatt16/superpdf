@@ -466,3 +466,47 @@ body.sigsheet #reader{padding-bottom:190px}
 
 /* v1.9.6: two copy buttons side by side on the start screen */
 .copybtns{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}
+
+/* v1.9.7 text layer (pdf.js), selection menu, highlights, find */
+.annlayer{pointer-events:none}
+.annlayer .annot,.annlayer.tool{pointer-events:auto}
+.tlwrap{position:absolute;transform-origin:50% 50%;z-index:1}
+.textLayer{position:absolute;text-align:initial;inset:0;overflow:clip;opacity:1;line-height:1;-webkit-text-size-adjust:none;text-size-adjust:none;forced-color-adjust:none;transform-origin:0 0;caret-color:CanvasText;z-index:0;-webkit-user-select:text;user-select:text;-webkit-touch-callout:default}
+.textLayer[data-main-rotation="90"]{transform:rotate(90deg) translateY(-100%)}
+.textLayer[data-main-rotation="180"]{transform:rotate(180deg) translate(-100%,-100%)}
+.textLayer[data-main-rotation="270"]{transform:rotate(270deg) translateX(-100%)}
+.textLayer :is(span,br){color:transparent;position:absolute;white-space:pre;cursor:text;transform-origin:0% 0%}
+.textLayer > :not(.markedContent),.textLayer .markedContent span:not(.markedContent){z-index:1}
+.textLayer span.markedContent{top:0;height:0}
+.textLayer ::selection{background:rgba(20,102,224,.3);color:transparent}
+.textLayer br::selection{background:transparent}
+.textLayer .endOfContent{display:block;position:absolute;inset:100% 0 0;z-index:0;cursor:default;-webkit-user-select:none;user-select:none}
+.textLayer.selecting .endOfContent{top:0}
+.textLayer.ocr span{line-height:1.15}
+.findhits{position:absolute;inset:0;pointer-events:none;z-index:2}
+.findhits .fh{position:absolute;background:rgba(255,196,0,.38);border-radius:2px}
+.findhits .fh.cur{background:rgba(255,120,0,.45);outline:2px solid #f06a00}
+.annot.annmark{padding:0;border:0;margin:0;width:0;height:0;white-space:normal;pointer-events:none!important;cursor:pointer}
+.annmark .mk{position:absolute;pointer-events:auto;cursor:pointer}
+.annmark.hl .mk{background:var(--c);opacity:.42}
+.annmark.ul .mk{background:linear-gradient(var(--c),var(--c)) 0 100%/100% max(1.5px,7.5%) no-repeat}
+.annmark.st .mk{background:linear-gradient(var(--c),var(--c)) 0 56%/100% max(1.5px,7.5%) no-repeat}
+.annmark.selected .mk{outline:1.5px dashed var(--accent);outline-offset:1px}
+.selpop{position:fixed;z-index:60;display:flex;align-items:center;gap:2px;background:#1b2330;color:#fff;border-radius:10px;padding:4px;box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.selpop button{display:inline-flex;align-items:center;gap:5px;height:32px;min-width:32px;padding:0 8px;border:0;border-radius:7px;background:none;color:inherit;font:inherit;cursor:pointer}
+.selpop button:hover{background:rgba(255,255,255,.14)}
+.selpop svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.selpop .dot{width:18px;min-width:18px;height:18px;padding:0;border-radius:50%;border:2px solid transparent;margin:0 1px}
+.selpop .dot.on{border-color:#fff}
+.selpop .sep{width:1px;height:20px;background:rgba(255,255,255,.22);margin:0 3px}
+.findbar{position:absolute;top:10px;right:18px;z-index:30;background:#fff;border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.14);padding:6px;max-width:calc(100% - 24px)}
+.findrow{display:flex;align-items:center;gap:4px}
+.findbar .fi{width:18px;height:18px;margin:0 2px 0 4px;fill:none;stroke:var(--muted);stroke-width:2}
+.findbar input{width:230px;max-width:46vw;height:32px;border:1px solid var(--line);border-radius:7px;padding:0 8px;font:inherit;outline:none}
+.findbar input:focus{border-color:var(--accent)}
+.findbar .tbtn.icon{width:32px;height:32px;padding:0;justify-content:center}
+.findbar svg.up{transform:rotate(180deg)}
+.findcount{min-width:56px;text-align:center;font-size:12.5px;color:var(--muted);font-variant-numeric:tabular-nums}
+.findcount.none{color:#d92d20}
+.findmsg{font-size:12.5px;color:#475467;padding:6px 6px 2px;max-width:420px}
+@media (max-width:760px){.findbar{left:8px;right:8px;top:6px}.findbar input{flex:1;width:auto;max-width:none}.selpop button span{display:none}}
